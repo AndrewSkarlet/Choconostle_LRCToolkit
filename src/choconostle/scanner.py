@@ -24,6 +24,7 @@ from typing import Callable
 from choconostle import lrc
 from choconostle.audio import analyze_track
 from choconostle.config import (
+    BACKUP_DIR_NAME,
     COVER_NAMES,
     DISC_FOLDER_PATTERN,
     SUPPORTED_AUDIO,
@@ -114,6 +115,8 @@ def scan_directory(
         scan.walk_errors.append(f"{error.filename}: {error.strerror or error}")
 
     for dirpath, dirnames, filenames in os.walk(directory, onerror=on_error):
+        # La carpeta de respaldos tiene copias de letras: nunca se escanea.
+        dirnames[:] = [name for name in dirnames if name.lower() != BACKUP_DIR_NAME.lower()]
         if not include_hidden:
             dirnames[:] = [name for name in dirnames if not _is_hidden(name)]
         dirnames.sort(key=str.lower)
