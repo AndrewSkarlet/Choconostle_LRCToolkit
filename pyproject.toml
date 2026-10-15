@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "choconostle-lrctoolkit"
+version = "0.1.0"
+description = "Toolkit para analizar, reparar y organizar bibliotecas musicales con archivos LRC."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Andrew" }]
+requires-python = ">=3.9"
+dependencies = [
+    "mutagen>=1.47",
+    "typer>=0.12",
+    "rich>=13",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Environment :: Console",
+    "Topic :: Multimedia :: Sound/Audio",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+choconostle = "choconostle.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
