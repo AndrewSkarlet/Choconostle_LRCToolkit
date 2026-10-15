@@ -5,6 +5,8 @@ Interfaz de línea de comandos.
 
 Uso:
     choconostle scan RUTA [--group-by folder|tag] [--json reporte.json]
+    choconostle normalize-lyrics RUTA --strip-headers|--standardize-headers [--apply]
+    choconostle revert CARPETA_DE_RESPALDO
     choconostle version
 
 Autor: Andrew
@@ -16,15 +18,22 @@ from __future__ import annotations
 import sys
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import typer
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from choconostle.config import APP_CODENAME, APP_DESCRIPTION, APP_NAME, APP_VERSION
-from choconostle.report import build_report, print_report, write_json
-from choconostle.scanner import scan_directory
+from choconostle import backup
+from choconostle.normalizer import (
+    ENCODING_KEEP, ENCODING_UTF8, ENCODING_UTF8_BOM, MODE_STANDARDIZE, MODE_STRIP,
+    LyricsNormalizer, SelectionError, select,
+)
+from choconostle.report import (
+    build_report, print_normalize_plan, print_report, print_revert, write_json,
+)
+from choconostle.scanner import LibraryScan, scan_directory
 
 app = typer.Typer(
     help=APP_DESCRIPTION,
@@ -38,6 +47,12 @@ class GroupBy(str, Enum):
     tag = "tag"
 
 
+class LyricsEncoding(str, Enum):
+    utf8 = ENCODING_UTF8
+    utf8_bom = ENCODING_UTF8_BOM
+    keep = ENCODING_KEEP
+
+
 def _safe_streams() -> None:
     # Nombres de archivo con caracteres que la consola no puede mostrar
     # (p. ej. japonés en una consola cp1252 de Windows) no deben romper
@@ -47,6 +62,27 @@ def _safe_streams() -> None:
             stream.reconfigure(errors="replace")
         except (AttributeError, ValueError):
             pass
+
+
+def _scan(path: Path, include_hidden: bool, no_progress: bool, error_console: Console) -> LibraryScan:
+    """Escanea mostrando el progreso si la salida es una terminal."""
+    if no_progress or not error_console.is_terminal:
+        return scan_directory(path, include_hidden=include_hidden)
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("{task.description}"),
+        console=error_console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Escaneando...", total=None)
+        count = 0
+
+        def on_file(file: Path) -> None:
+            nonlocal count
+            count += 1
+            progress.update(task, description=f"Escaneando... {count} archivos  {file.name}")
+
+        return scan_directory(path, include_hidden=include_hidden, on_file=on_file)
 
 
 @app.command()
@@ -83,32 +119,106 @@ def scan(
         error_console.print(f"No es una carpeta: {path}", style="red", markup=False)
         raise typer.Exit(code=2)
 
-    show_progress = not no_progress and error_console.is_terminal
-    if show_progress:
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("{task.description}"),
-            console=error_console,
-            transient=True,
-        ) as progress:
-            task = progress.add_task("Escaneando...", total=None)
-            count = 0
-
-            def on_file(file: Path) -> None:
-                nonlocal count
-                count += 1
-                progress.update(task, description=f"Escaneando... {count} archivos  {file.name}")
-
-            result = scan_directory(path, include_hidden=include_hidden, on_file=on_file)
-    else:
-        result = scan_directory(path, include_hidden=include_hidden)
-
+    result = _scan(path, include_hidden, no_progress, error_console)
     report = build_report(result, group_by=group_by.value)
     print_report(report, console=console, limit=limit)
 
     if json_path is not None:
         write_json(report, json_path)
         console.print(f"Reporte JSON guardado en: {json_path}")
+
+
+@app.command("normalize-lyrics")
+def normalize_lyrics(
+    path: Path = typer.Argument(..., help="Carpeta de la biblioteca musical."),
+    strip_headers: bool = typer.Option(
+        False, "--strip-headers",
+        help="Quita las cabeceras LRC ([ar:], [ti:], [by:]...). Aplica [offset:] antes de quitarlo.",
+    ),
+    standardize_headers: bool = typer.Option(
+        False, "--standardize-headers",
+        help="Deja solo [ar:], [ti:], [al:] y [length:] con datos de las etiquetas de la canción.",
+    ),
+    encoding: LyricsEncoding = typer.Option(
+        LyricsEncoding.utf8, "--encoding", "-e",
+        help="Codificación de los .lrc/.txt: utf8 (sin BOM), utf8-bom o keep (conserva la actual).",
+    ),
+    only: Optional[List[str]] = typer.Option(
+        None, "--only", "-o",
+        help="Limita a una carpeta (ruta) o álbum (nombre). Se puede repetir.",
+    ),
+    apply: bool = typer.Option(
+        False, "--apply",
+        help="Aplica los cambios. Sin esta opción solo se muestra qué cambiaría.",
+    ),
+    diff: bool = typer.Option(False, "--diff", help="Muestra las diferencias línea por línea."),
+    limit: int = typer.Option(
+        20, "--limit", "-l",
+        help="Máximo de canciones por lista en pantalla (0 = sin límite).",
+    ),
+    include_hidden: bool = typer.Option(
+        False, "--include-hidden",
+        help="Incluye carpetas y archivos ocultos (que empiezan con '.').",
+    ),
+    no_progress: bool = typer.Option(False, "--no-progress", help="No muestra el progreso del escaneo."),
+) -> None:
+    """Quita o estandariza las cabeceras de las letras (archivos y etiquetas incrustadas)."""
+    _safe_streams()
+    console = Console(highlight=False)
+    error_console = Console(stderr=True, highlight=False)
+
+    if strip_headers == standardize_headers:
+        error_console.print("Elige un modo: --strip-headers o --standardize-headers.", style="red")
+        raise typer.Exit(code=2)
+    mode = MODE_STRIP if strip_headers else MODE_STANDARDIZE
+
+    path = path.expanduser()
+    if not path.is_dir():
+        error_console.print(f"No es una carpeta: {path}", style="red", markup=False)
+        raise typer.Exit(code=2)
+
+    result = _scan(path, include_hidden, no_progress, error_console)
+    try:
+        tracks, orphans = select(result, only or [])
+    except SelectionError as exc:
+        error_console.print(str(exc), style="red", markup=False)
+        raise typer.Exit(code=2)
+
+    normalizer = LyricsNormalizer(mode, encoding.value)
+    changes = normalizer.plan(result, tracks, orphans)
+    session = normalizer.apply(changes, path) if apply else None
+    print_normalize_plan(
+        changes, path, mode, encoding.value, console=console, limit=limit,
+        show_diff=diff, session=session,
+    )
+    if session is not None and any(item["status"] != backup.ITEM_APPLIED
+                                   for item in session.manifest["items"]):
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def revert(
+    folder: Path = typer.Argument(
+        ..., help="Carpeta de respaldo: <biblioteca>/ChoconostleLRCTool_back/<fecha-hora>."),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Restaura también las letras que cambiaron después de normalizarlas.",
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Solo muestra qué se restauraría."),
+) -> None:
+    """Restaura las letras originales desde una carpeta de respaldo de normalize-lyrics."""
+    _safe_streams()
+    console = Console(highlight=False)
+    error_console = Console(stderr=True, highlight=False)
+    folder = folder.expanduser()
+    try:
+        results = backup.revert(folder, force=force, dry_run=dry_run)
+    except (FileNotFoundError, ValueError, KeyError) as exc:
+        error_console.print(f"No se puede revertir: {exc}", style="red", markup=False)
+        raise typer.Exit(code=2)
+    print_revert(results, folder, console=console, dry_run=dry_run)
+    if any(result.status in (backup.REVERT_CONFLICT, backup.REVERT_ERROR) for result in results):
+        raise typer.Exit(code=1)
 
 
 @app.command()
