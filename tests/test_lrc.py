@@ -124,7 +124,7 @@ def test_missing_file(tmp_path):
 
 
 def test_embedded_text_with_bom():
-    info = lrc.analyze_embedded("﻿[00:01.00]Hola", "LYRICS")
+    info = lrc.analyze_embedded("\ufeff[00:01.00]Hola", "LYRICS")
     assert info.source == SOURCE_EMBEDDED
     assert info.has_bom
     assert info.synced
