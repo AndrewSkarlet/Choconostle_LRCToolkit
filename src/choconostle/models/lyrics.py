@@ -38,6 +38,10 @@ class LyricsInfo:
     encoding: str = "utf-8"
     is_utf8: bool = True
     empty: bool = False
+    content_lines: int = 0
+    """Líneas con texto de la letra (sin contar cabeceras ni marcas vacías)."""
+    nearly_empty: bool = False
+    """Pocas líneas con texto (ver NEARLY_EMPTY_MAX_LINES). Se marcan, no se corrigen."""
     error: str | None = None
 
     @property
@@ -61,6 +65,8 @@ class LyricsInfo:
             "encoding": self.encoding,
             "is_utf8": self.is_utf8,
             "empty": self.empty,
+            "content_lines": self.content_lines,
+            "nearly_empty": self.nearly_empty,
             "needs_fix": self.needs_fix,
             "error": self.error,
         }
