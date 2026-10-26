@@ -130,6 +130,7 @@ def build_report(scan: LibraryScan, group_by: str = GROUP_BY_FOLDER) -> dict:
     # Letras por tipo de fuente (lrc / txt / incrustada).
     found: dict[str, Counter] = {"lrc": Counter(), "txt": Counter(), "embedded": Counter()}
     to_fix: list[dict] = []
+    nearly_empty: list[dict] = []
     header_counts: Counter = Counter()
     issue_counts = Counter()
 
@@ -144,6 +145,14 @@ def build_report(scan: LibraryScan, group_by: str = GROUP_BY_FOLDER) -> dict:
             issue_counts["bom"] += 1
         if not lyrics.is_utf8:
             issue_counts["not_utf8"] += 1
+        if lyrics.nearly_empty and not lyrics.error:
+            nearly_empty.append({
+                "track": _rel(track.filepath, root) if track else None,
+                "location": (_rel(lyrics.location, root) if lyrics.source == SOURCE_EXTERNAL
+                             else lyrics.location),
+                "source": lyrics.source,
+                "content_lines": lyrics.content_lines,
+            })
         if lyrics.needs_fix:
             location = (_rel(lyrics.location, root) if lyrics.source == SOURCE_EXTERNAL
                         else lyrics.location)
@@ -211,6 +220,7 @@ def build_report(scan: LibraryScan, group_by: str = GROUP_BY_FOLDER) -> dict:
             "header_counts": dict(header_counts.most_common()),
         },
         "lyrics_to_fix": to_fix,
+        "lyrics_nearly_empty": nearly_empty,
         "no_embedded_lyrics_support": {
             "tracks": len(no_embedded_support),
             "by_format": dict(no_embedded_by_format),
@@ -369,6 +379,16 @@ def print_report(report: dict, console: Console | None = None, limit: int = 20) 
         console.print(table)
         _more(console, hidden)
 
+    nearly = report["lyrics_nearly_empty"]
+    if nearly:
+        _section(console, f"Letras casi vacías ({len(nearly)})")
+        console.print("Pocas o ninguna línea con texto. normalize-lyrics no las modifica.", style="dim")
+        shown, hidden = _limited(nearly, limit)
+        for item in shown:
+            name = item["location"] if item["source"] == SOURCE_EXTERNAL else f"{item['track']} [{item['location']}]"
+            console.print(Text(f"  {name}: {plural(item['content_lines'], 'línea')}"))
+        _more(console, hidden)
+
     # Álbumes ----------------------------------------------------------
     albums = report["albums"]
     group_label = "por etiqueta" if report["group_by"] == GROUP_BY_TAG else "por carpeta"
@@ -456,3 +476,150 @@ def print_report(report: dict, console: Console | None = None, limit: int = 20) 
         _more(console, hidden)
 
     console.print()
+
+
+# --------------------------------------------------------------------------
+# normalize-lyrics y revert
+# --------------------------------------------------------------------------
+
+def _change_where(change, root: Path) -> str:
+    """Ruta de la canción (o del archivo de letra si no tiene canción)."""
+    path = change.track_path or change.path
+    return _rel(path, root)
+
+
+def print_normalize_plan(
+    changes: list,
+    root: Path,
+    mode: str,
+    encoding: str,
+    console: Console | None = None,
+    limit: int = 20,
+    show_diff: bool = False,
+    session=None,
+) -> None:
+    """Muestra el plan de normalize-lyrics (simulación) o el resultado (--apply)."""
+    from choconostle.backup import ITEM_FAILED, _diff
+    from choconostle.normalizer import (
+        KIND_FILE, MODE_STRIP, STATUS_CHANGE, STATUS_ERROR, STATUS_NEARLY_EMPTY,
+        STATUS_SKIPPED, STATUS_UNCHANGED,
+    )
+
+    console = console or Console()
+    by_status: dict[str, list] = {}
+    for change in changes:
+        by_status.setdefault(change.status, []).append(change)
+    to_change = by_status.get(STATUS_CHANGE, [])
+
+    title = "APLICADO" if session is not None else "SIMULACIÓN (no se modificó nada)"
+    console.print(f"[bold]normalize-lyrics - {title}[/bold]")
+    mode_name = "quitar cabeceras" if mode == MODE_STRIP else "estandarizar cabeceras (ar, ti, al, length)"
+    console.print(f"Modo: {mode_name}", markup=False)
+    console.print(f"Codificación de archivos .lrc/.txt: {encoding}", markup=False)
+    console.print(Text(f"Biblioteca: {root}"))
+
+    _section(console, "Resumen")
+    files = sum(1 for change in to_change if change.kind == KIND_FILE)
+    songs = {change.track_path or change.path for change in to_change}
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Letras revisadas", str(len(changes)))
+    table.add_row(
+        "Modificadas" if session is not None else "A modificar",
+        f"{len(to_change)} ({plural(files, 'archivo')}, {plural(len(to_change) - files, 'incrustada')}) "
+        f"en {plural(len(songs), 'canción', 'canciones')}",
+    )
+    table.add_row("Sin cambios", str(len(by_status.get(STATUS_UNCHANGED, []))))
+    table.add_row("Casi vacías (no se tocan)", str(len(by_status.get(STATUS_NEARLY_EMPTY, []))))
+    if by_status.get(STATUS_SKIPPED):
+        table.add_row("Omitidas", str(len(by_status[STATUS_SKIPPED])))
+    if by_status.get(STATUS_ERROR):
+        table.add_row("Errores", f"[red]{len(by_status[STATUS_ERROR])}[/red]")
+    console.print(table)
+
+    if to_change:
+        _section(console, "Cambios" if session is not None else "Cambios que se aplicarían")
+        groups: dict[str, list] = {}
+        for change in to_change:
+            groups.setdefault(_change_where(change, root), []).append(change)
+        names = list(groups)
+        shown, hidden = _limited(names, limit)
+        for name in shown:
+            console.print(Text(name, style="bold"))
+            table = Table(show_header=False, box=None, padding=(0, 1, 0, 3))
+            table.add_column()
+            table.add_column()
+            for change in groups[name]:
+                table.add_row(Text(change.label), Text("; ".join(change.details)))
+            console.print(table)
+            if show_diff:
+                for change in groups[name]:
+                    console.print(Text(f"   {change.label}:", style="bold dim"))
+                    for line in _diff(change.original_text, change.new_text)[2:]:
+                        style = "green" if line.startswith("+") else "red" if line.startswith("-") else "dim"
+                        console.print(Text("     " + line, style=style))
+        _more(console, hidden)
+
+    def listing(title: str, items: list, style: str | None = None) -> None:
+        if not items:
+            return
+        _section(console, f"{title} ({len(items)})")
+        shown, hidden = _limited(items, limit)
+        for change in shown:
+            label = "" if change.kind == KIND_FILE else f" [{change.label}]"
+            where = _rel(change.path, root) + label
+            console.print(Text(f"  {where}: {change.message}", style=style or ""))
+        _more(console, hidden)
+
+    listing("Letras casi vacías: se marcan y no se modifican", by_status.get(STATUS_NEARLY_EMPTY, []))
+    listing("Omitidas", by_status.get(STATUS_SKIPPED, []), "dim")
+    listing("Errores", by_status.get(STATUS_ERROR, []), "red")
+
+    console.print()
+    if session is None:
+        if to_change:
+            console.print(
+                "Para aplicar los cambios, repite el comando con --apply. "
+                f"Antes se guardará un respaldo en {root / 'ChoconostleLRCTool_back'}.",
+                markup=False,
+            )
+        else:
+            console.print("No hay nada que modificar.")
+        return
+
+    failed = [item for item in session.manifest["items"] if item["status"] == ITEM_FAILED]
+    if failed:
+        _section(console, f"No se pudieron aplicar ({len(failed)})")
+        for item in failed:
+            console.print(Text(f"  {item['path']} [{item['label']}]: {item['error']}", style="red"))
+        console.print()
+    console.print(Text(f"Respaldo guardado en: {session.folder}"))
+    console.print(Text(f'Para deshacer: choconostle revert "{session.folder}"'))
+
+
+def print_revert(results: list, folder: Path, console: Console | None = None,
+                 dry_run: bool = False) -> None:
+    from choconostle.backup import REVERT_ALREADY, REVERT_CONFLICT, REVERT_ERROR, REVERT_RESTORED
+
+    console = console or Console()
+    title = "SIMULACIÓN (no se modificó nada)" if dry_run else "resultado"
+    console.print(f"[bold]revert - {title}[/bold]")
+    console.print(Text(f"Respaldo: {folder}"))
+    counts = Counter(result.status for result in results)
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column(style="bold")
+    table.add_column()
+    table.add_row("Se restaurarían" if dry_run else "Restauradas", str(counts[REVERT_RESTORED]))
+    table.add_row("Ya estaban como el original", str(counts[REVERT_ALREADY]))
+    if counts[REVERT_CONFLICT]:
+        table.add_row("Conflictos (no se tocaron)", f"[yellow]{counts[REVERT_CONFLICT]}[/yellow]")
+    if counts[REVERT_ERROR]:
+        table.add_row("Errores", f"[red]{counts[REVERT_ERROR]}[/red]")
+    console.print(table)
+    for result in results:
+        if result.status in (REVERT_CONFLICT, REVERT_ERROR):
+            item = result.item
+            where = item["path"] if item["kind"] == "file" else f"{item['path']} [{item['label']}]"
+            style = "yellow" if result.status == REVERT_CONFLICT else "red"
+            console.print(Text(f"  {where}: {result.message}", style=style))

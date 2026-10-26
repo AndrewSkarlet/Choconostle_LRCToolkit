@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.2.0 - Fase 2: normalización de letras
+
+### Agregado
+- Comando `normalize-lyrics` (módulo `LyricsNormalizer`) con dos modos:
+  - `--strip-headers`: quita las cabeceras LRC y aplica `[offset:]` a las marcas de tiempo antes de quitarlo.
+  - `--standardize-headers`: deja solo `[ar:]`, `[ti:]`, `[al:]` y `[length:]`, con datos de las etiquetas (nunca inventados).
+- Se aplica a todas las copias de la letra: `.lrc`/`.txt`, `LYRICS`, `UNSYNCEDLYRICS`, `USLT`, `SYLT`, `TXXX:LYRICS`, `©lyr` y APEv2.
+- Simulación por defecto; `--apply` para modificar. Opciones `--encoding utf8|utf8-bom|keep`, `--only`, `--diff`.
+- Letras casi vacías marcadas en `scan` y en `normalize-lyrics`, sin modificarlas.
+- Respaldo en `ChoconostleLRCTool_back/<fecha-hora>/` con originales, `registro.txt` y `manifiesto.json`.
+- Comando `revert` con detección de conflictos, `--force` y `--dry-run`.
+- Pruebas de apply + revert que verifican que letras, etiquetas y audio quedan idénticos.
+
+### Cambiado
+- La versión de ID3 (2.3 o 2.4) se conserva al guardar.
+- El escáner ignora la carpeta de respaldos.
+
 ## v0.1.0 - Fase 1: escaneo y reporte
 
 ### Agregado

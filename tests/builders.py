@@ -28,13 +28,18 @@ needs_ffmpeg = pytest.mark.skipif(FFMPEG is None, reason="requiere ffmpeg")
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 16 + b"\xff\xd9"
 
 
-def make_flac(path: Path, rate=44100, bits=16, channels=2, seconds=1, tags=None, picture=False) -> Path:
-    """FLAC con solo el bloque STREAMINFO (mutagen no necesita frames de audio)."""
+def make_flac(path: Path, rate=44100, bits=16, channels=2, seconds=1, tags=None, picture=False,
+              payload: bytes = b"") -> Path:
+    """
+    FLAC con solo el bloque STREAMINFO (mutagen no necesita frames de
+    audio). `payload` se agrega después de los metadatos como si fuera el
+    audio, para comprobar que no se modifica.
+    """
     samples = rate * seconds
     packed = (rate << 44) | ((channels - 1) << 41) | ((bits - 1) << 36) | samples
     streaminfo = struct.pack(">HH", 4096, 4096) + b"\x00" * 6 + packed.to_bytes(8, "big") + b"\x00" * 16
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"fLaC" + bytes([0x80]) + len(streaminfo).to_bytes(3, "big") + streaminfo)
+    path.write_bytes(b"fLaC" + bytes([0x80]) + len(streaminfo).to_bytes(3, "big") + streaminfo + payload)
     if tags or picture:
         audio = FLAC(path)
         for key, value in (tags or {}).items():
@@ -119,3 +124,22 @@ def ffmpeg(path: Path, *args: str, rate=44100) -> Path:
     ]
     subprocess.run(command, check=True)
     return path
+
+
+def audio_payload(path: Path) -> bytes:
+    """Bytes de audio (sin metadatos) de un FLAC o MP3, para comparar."""
+    data = path.read_bytes()
+    if data[:4] == b"fLaC":
+        position = 4
+        while True:
+            header = data[position]
+            size = int.from_bytes(data[position + 1:position + 4], "big")
+            position += 4 + size
+            if header & 0x80:
+                return data[position:]
+    if data[:3] == b"ID3":
+        size = 0
+        for byte in data[6:10]:
+            size = (size << 7) | (byte & 0x7F)
+        return data[10 + size:]
+    return data

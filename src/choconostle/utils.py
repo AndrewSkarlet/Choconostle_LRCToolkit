@@ -9,6 +9,9 @@ Licencia: MIT
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 
 def format_size(size: int) -> str:
     """1536 -> "1.5 KB"."""
@@ -57,3 +60,20 @@ def percent(part: int, total: int) -> str:
     if not total:
         return "0%"
     return f"{part * 100 / total:.1f}%"
+
+
+def write_file_atomic(path: Path, data: bytes) -> None:
+    """
+    Escribe un archivo de forma segura: primero en uno temporal junto al
+    original y luego lo reemplaza, para no dejarlo a medias si algo falla.
+    """
+    temporary = path.with_name(path.name + ".choconostle-tmp")
+    try:
+        with open(temporary, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()

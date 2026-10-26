@@ -353,6 +353,28 @@ def _check_extension(track: Track) -> None:
         )
 
 
+def open_audio(path: Path):
+    """
+    Abre un archivo con mutagen eligiendo el lector por su contenido.
+
+    Retorna None si mutagen no reconoce el formato. Puede lanzar
+    OSError o mutagen.MutagenError.
+    """
+    readers = _sniff(path)
+    if readers is None:
+        return mutagen.File(path)
+    if len(readers) == 1:
+        # Se abre directamente: mutagen.File() podría descartar el lector
+        # si la extensión no le corresponde.
+        return readers[0](path)
+    return mutagen.File(path, options=readers)
+
+
+def is_matroska(path: Path) -> bool:
+    with open(path, "rb") as handle:
+        return handle.read(4) == matroska.EBML_MAGIC
+
+
 def analyze_track(track: Track) -> None:
     """
     Identifica el formato real de la pista y lee sus etiquetas.
@@ -361,20 +383,10 @@ def analyze_track(track: Track) -> None:
     que un archivo dañado no detenga el escaneo.
     """
     try:
-        with open(track.filepath, "rb") as handle:
-            magic = handle.read(4)
-        if magic == matroska.EBML_MAGIC:
+        if is_matroska(track.filepath):
             _identify_matroska(track)
         else:
-            readers = _sniff(track.filepath)
-            if readers is None:
-                audio = mutagen.File(track.filepath)
-            elif len(readers) == 1:
-                # Se abre directamente: mutagen.File() podría descartar el
-                # lector si la extensión no le corresponde.
-                audio = readers[0](track.filepath)
-            else:
-                audio = mutagen.File(track.filepath, options=readers)
+            audio = open_audio(track.filepath)
             if audio is None:
                 track.error = "Formato no reconocido (el contenido no es audio compatible)."
                 return

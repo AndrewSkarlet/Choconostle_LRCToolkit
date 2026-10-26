@@ -9,7 +9,7 @@ Autor: Andrew
 
 APP_NAME = "Choconostle_LRCToolkit"
 APP_CODENAME = "Xoconostle"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 APP_AUTHOR = "Andrew"
 APP_LICENSE = "MIT"
 
@@ -92,3 +92,14 @@ LRC_HEADER_TAGS = [
 
 # Tamaño máximo que se lee de un archivo de letra externo.
 MAX_LYRICS_FILE_SIZE = 2 * 1024 * 1024
+
+# Letras con este número de líneas con texto o menos se consideran "casi
+# vacías": se marcan en el reporte y normalize-lyrics no las modifica.
+NEARLY_EMPTY_MAX_LINES = 2
+
+# Cabeceras que escribe normalize-lyrics --standardize-headers, en orden.
+STANDARD_HEADERS = ["ar", "ti", "al", "length"]
+
+# Carpeta de respaldos de normalize-lyrics, en la raíz de la biblioteca.
+# El escáner nunca entra en ella.
+BACKUP_DIR_NAME = "ChoconostleLRCTool_back"
