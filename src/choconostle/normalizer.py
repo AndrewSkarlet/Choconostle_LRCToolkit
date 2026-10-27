@@ -33,7 +33,13 @@ from pathlib import Path
 from choconostle import lrc
 from choconostle.backup import ITEM_APPLIED, ITEM_FAILED, BackupSession
 from choconostle.config import NEARLY_EMPTY_MAX_LINES, STANDARD_HEADERS
-from choconostle.embedded import EmbeddedError, EmbeddedLyrics, Slot
+from choconostle.embedded import Slot, open_editor
+from choconostle.rawtags import MODE_FULL, REASONS, Unsupported, apply_patches, sha256
+from choconostle.rawtags.ogg import OggEditor
+from choconostle.rawtags.writer import (
+    ChangedError, Journal, RestoreError, WriteError, file_signature, required_space, rewrite_with,
+    write_edit,
+)
 from choconostle.models.lyrics import SOURCE_EXTERNAL
 from choconostle.models.track import Track
 from choconostle.scanner import LibraryScan
@@ -41,7 +47,7 @@ from choconostle.textio import (
     LyricsDecodeError, TargetEncoding, UnencodableError, decode_lyrics, encode_text,
     encoding_label, find_mojibake, parse_target_encoding, split_lines, strip_invisible_prefix,
 )
-from choconostle.utils import plural, write_file_atomic
+from choconostle.utils import format_size, plural, write_file_atomic
 
 MODE_STRIP = "strip"
 MODE_STANDARDIZE = "standardize"
@@ -486,6 +492,10 @@ class LyricsChange:
     slot: Slot | None = None
     original_value: object = None
     new_value: object = None
+    file_plan: dict | None = None
+    """Datos del archivo al planificar: firma, hash de la región, modo de escritura."""
+    skip_reason: str | None = None
+    """Motivo de omisión (clave de rawtags.REASONS) si no se puede editar."""
 
     # Texto (para el registro y la vista previa).
     original_text: str = ""
@@ -525,6 +535,7 @@ class LyricsNormalizer:
         strip_unknown: bool = False,
         offset_policy: str = OFFSET_SKIP,
         skip_near_empty: bool = False,
+        allow_full_rewrite: bool = False,
     ):
         if mode not in (MODE_STRIP, MODE_STANDARDIZE):
             raise ValueError(f"Modo desconocido: {mode}")
@@ -536,6 +547,7 @@ class LyricsNormalizer:
         self.strip_unknown = strip_unknown
         self.offset_policy = offset_policy
         self.skip_near_empty = skip_near_empty
+        self.allow_full_rewrite = allow_full_rewrite
 
     # ------------------------------------------------------------------
 
@@ -704,27 +716,70 @@ class LyricsNormalizer:
         return block, None
 
     def _plan_embedded(self, track: Track, headers) -> list[LyricsChange]:
+        path = track.filepath
+
+        def single(status, message, reason=None):
+            return [LyricsChange(kind=KIND_EMBEDDED, path=path, track=track, label="(incrustada)",
+                                 status=status, message=message, skip_reason=reason)]
         try:
-            audio = EmbeddedLyrics(track.filepath)
-            slots = audio.slots()
-        except EmbeddedError as exc:
-            return [LyricsChange(kind=KIND_EMBEDDED, path=track.filepath, track=track,
-                                 label="(incrustada)", status=STATUS_SKIPPED, message=str(exc))]
+            editor = open_editor(path)
+            if editor is None:
+                return []
+            signature = file_signature(path)
+            slots = editor.slots()
+        except Unsupported as exc:
+            return single(STATUS_SKIPPED, str(exc), exc.reason)
         except Exception as exc:  # noqa: BLE001 - un archivo dañado no detiene el plan
-            return [LyricsChange(kind=KIND_EMBEDDED, path=track.filepath, track=track,
-                                 label="(incrustada)", status=STATUS_ERROR,
-                                 message=f"No se pudo leer: {exc}")]
+            return single(STATUS_ERROR, f"No se pudo leer: {exc}")
 
         changes = []
         for slot in slots:
-            change = LyricsChange(kind=KIND_EMBEDDED, path=track.filepath, track=track,
+            change = LyricsChange(kind=KIND_EMBEDDED, path=path, track=track,
                                   label=slot.label, slot=slot, original_value=slot.value)
             if slot.is_sylt:
                 self._plan_sylt(change, slot)
             else:
                 self._plan_text_slot(change, slot, headers)
             changes.append(change)
+        self._plan_file_edit(editor, signature, [c for c in changes if c.status == STATUS_CHANGE])
         return changes
+
+    def _plan_file_edit(self, editor, signature, changed: list[LyricsChange]) -> None:
+        """Comprueba que la edición de bytes es posible y cómo se escribirá."""
+        if not changed:
+            return
+
+        def skip(reason, message):
+            for change in changed:
+                change.status = STATUS_SKIPPED
+                change.skip_reason = reason
+                change.message = message
+                change.details = []
+
+        values = {(c.slot.key, c.slot.index): c.new_value for c in changed}
+        try:
+            edit = editor.build(values)
+            if not isinstance(editor, OggEditor):
+                problems = editor.verify(apply_patches(editor.region, edit.patches), edit.expected)
+                if problems:
+                    raise Unsupported("id3_frame_format", "la edición no sería segura: " + "; ".join(problems))
+        except Unsupported as exc:
+            skip(exc.reason, str(exc))
+            return
+        note = edit.note
+        if edit.mode == MODE_FULL:
+            size_after = signature[0] + edit.new_len - edit.old_len
+            note = (f"reescritura completa, requiere {format_size(required_space(size_after))} libres"
+                    + (f" ({edit.note})" if edit.note else ""))
+            if not self.allow_full_rewrite:
+                skip("full_rewrite", f"{note}. Usa --allow-full-rewrite para aplicarla.")
+                return
+        plan = {"signature": list(signature), "mode": edit.mode,
+                "region_sha": None if isinstance(editor, OggEditor) else sha256(editor.region)}
+        for change in changed:
+            change.file_plan = plan
+            if note:
+                change.details.append(note)
 
     def _plan_text_slot(self, change: LyricsChange, slot: Slot, headers) -> None:
         text = slot.value or ""
@@ -761,6 +816,9 @@ class LyricsNormalizer:
         carpeta de respaldo. Retorna la sesión de respaldo, o None si no
         había nada que cambiar.
         """
+        pending = pending_sessions(root)
+        if pending:
+            raise PendingWritesError(pending)
         selected = [change for change in changes if change.status == STATUS_CHANGE]
         if not selected:
             return None
@@ -776,11 +834,14 @@ class LyricsNormalizer:
             else:
                 embedded.setdefault(change.path, []).append((change, item))
 
-        for path, pairs in embedded.items():
-            self._apply_embedded(path, pairs)
-
-        session.save_manifest()
-        session.write_log()
+        journal = Journal(session.folder)
+        try:
+            for path, pairs in embedded.items():
+                self._apply_embedded(path, pairs, session, journal)
+                session.save_manifest()
+        finally:
+            session.save_manifest()
+            session.write_log()
         return session
 
     @staticmethod
@@ -796,38 +857,82 @@ class LyricsNormalizer:
         item["status"] = ITEM_APPLIED
 
     @staticmethod
-    def _apply_embedded(path: Path, pairs: list[tuple[LyricsChange, dict]]) -> None:
-        def fail(targets, message):
-            for _change, item in targets:
+    def _apply_embedded(path: Path, pairs: list[tuple[LyricsChange, dict]], session: BackupSession,
+                        journal: Journal) -> None:
+        """Edita las letras de un archivo de audio en una sola escritura verificada."""
+        def fail(message):
+            for _change, item in pairs:
                 item["status"] = ITEM_FAILED
                 item["error"] = message
 
+        plan = pairs[0][0].file_plan
         try:
-            audio = EmbeddedLyrics(path)
+            editor = open_editor(path)
+            if editor is None:
+                raise ChangedError("el archivo ya no tiene etiquetas")
+            if file_signature(path) != tuple(plan["signature"]):
+                raise ChangedError("el archivo cambió desde que se planearon los cambios")
+            if plan["region_sha"] is not None and sha256(editor.region) != plan["region_sha"]:
+                raise ChangedError("las etiquetas cambiaron desde que se planearon los cambios")
+            current = {(slot.key, slot.index): slot.value for slot in editor.slots()}
+            for change, _item in pairs:
+                if current.get((change.slot.key, change.slot.index)) != change.original_value:
+                    raise ChangedError("la letra cambió desde que se planearon los cambios")
+            values = {(c.slot.key, c.slot.index): c.new_value for c, _item in pairs}
+            edit = editor.build(values)
+            if edit.mode != plan["mode"]:
+                raise ChangedError("la forma de escribir cambió desde que se planearon los cambios")
+        except (Unsupported, ChangedError) as exc:
+            fail(str(exc))
+            return
         except Exception as exc:  # noqa: BLE001
-            fail(pairs, f"no se pudo abrir: {exc}")
+            fail(f"no se pudo abrir: {exc}")
             return
 
-        ready = []
-        for change, item in pairs:
-            ref = change.slot.ref()
-            current = audio.get(ref)
-            if current is None or current.value != change.original_value:
-                fail([(change, item)], "la etiqueta cambió desde que se planearon los cambios")
-                continue
-            try:
-                audio.set(ref, change.new_value)
-            except Exception as exc:  # noqa: BLE001
-                fail([(change, item)], f"no se pudo modificar: {exc}")
-                continue
-            ready.append((change, item))
-
-        if not ready:
-            return
+        record = session.add_edit(path, editor, edit, [item for _c, item in pairs], plan["signature"])
+        session.save_manifest()
         try:
-            audio.save()
-        except Exception as exc:  # noqa: BLE001
-            fail(ready, f"no se pudo guardar: {exc}")
+            if isinstance(editor, OggEditor):
+                summary = rewrite_with(path, plan["signature"], lambda tmp: OggEditor.modify(tmp, values),
+                                       lambda original, tmp: editor.check(original, tmp, edit.expected))
+            else:
+                summary = write_edit(path, editor, edit, journal, f"edit-{record['id']:04d}",
+                                     plan["signature"], record["path"])
+        except RestoreError as exc:
+            record["status"] = ITEM_FAILED
+            record["error"] = str(exc)
+            fail(f"ERROR GRAVE: {exc}")
+            raise
+        except (WriteError, OSError) as exc:
+            record["status"] = ITEM_FAILED
+            record["error"] = str(exc)
+            fail(str(exc))
             return
-        for _change, item in ready:
+        record.update(summary)
+        record["status"] = ITEM_APPLIED
+        for _change, item in pairs:
             item["status"] = ITEM_APPLIED
+
+
+class PendingWritesError(Exception):
+    """Hay escrituras interrumpidas sin resolver en alguna carpeta de respaldo."""
+
+    def __init__(self, folders: list[Path]):
+        self.folders = folders
+        names = ", ".join(str(folder) for folder in folders)
+        super().__init__(f"Hay escrituras interrumpidas sin resolver en: {names}. "
+                         "Ejecuta primero choconostle recover <carpeta> (o revert).")
+
+
+def pending_sessions(root: Path) -> list[Path]:
+    """Carpetas de respaldo con escrituras interrumpidas (diario no vacío)."""
+    from choconostle.config import BACKUP_DIR_NAME
+    base = Path(root) / BACKUP_DIR_NAME
+    if not base.is_dir():
+        return []
+    return [folder for folder in sorted(base.iterdir())
+            if folder.is_dir() and Journal(folder).pending()]
+
+
+def skip_reason_label(reason: str | None) -> str:
+    return REASONS.get(reason, reason or "otro motivo")

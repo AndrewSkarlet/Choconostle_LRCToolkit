@@ -28,8 +28,9 @@ from choconostle.config import APP_CODENAME, APP_DESCRIPTION, APP_NAME, APP_VERS
 from choconostle import backup
 from choconostle.normalizer import (
     ENCODING_KEEP, MODE_STANDARDIZE, MODE_STRIP, OFFSET_FIRST, OFFSET_LAST, OFFSET_SKIP, OFFSET_SUM,
-    LyricsNormalizer, SelectionError, select,
+    LyricsNormalizer, PendingWritesError, SelectionError, pending_sessions, select,
 )
+from choconostle.rawtags.writer import RestoreError
 from choconostle.report import (
     build_report, print_normalize_plan, print_report, print_revert, write_json,
 )
@@ -156,6 +157,12 @@ def normalize_lyrics(
         False, "--skip-near-empty",
         help="Omite las letras casi vacías (por defecto se procesan con un aviso).",
     ),
+    allow_full_rewrite: bool = typer.Option(
+        False, "--allow-full-rewrite",
+        help="Permite reescribir el archivo de audio completo cuando la letra no cabe en el relleno "
+             "de las etiquetas (y siempre en Ogg/Opus). Se hace en una copia temporal verificada; "
+             "requiere espacio libre del tamaño del archivo. Por defecto esos archivos se omiten.",
+    ),
     encoding: str = typer.Option(
         ENCODING_KEEP, "--encoding", "-e",
         help="Codificación de los .lrc/.txt: keep (conserva la actual, por defecto), utf8 (sin BOM), "
@@ -202,6 +209,12 @@ def normalize_lyrics(
         error_console.print(f"No es una carpeta: {path}", style="red", markup=False)
         raise typer.Exit(code=2)
 
+    pending = pending_sessions(path)
+    if pending:
+        error_console.print(str(PendingWritesError(pending)), style="yellow", markup=False)
+        if apply:
+            raise typer.Exit(code=2)
+
     result = _scan(path, include_hidden, no_progress, error_console)
     try:
         tracks, orphans = select(result, only or [])
@@ -212,14 +225,24 @@ def normalize_lyrics(
     normalizer = LyricsNormalizer(
         mode, encoding, strip_unknown=strip_unknown_headers,
         offset_policy=offset_policy.value, skip_near_empty=skip_near_empty,
+        allow_full_rewrite=allow_full_rewrite,
     )
     changes = normalizer.plan(result, tracks, orphans)
-    session = normalizer.apply(changes, path) if apply else None
+    try:
+        session = normalizer.apply(changes, path) if apply else None
+    except PendingWritesError as exc:
+        error_console.print(str(exc), style="red", markup=False)
+        raise typer.Exit(code=2)
+    except RestoreError as exc:
+        error_console.print(f"ERROR GRAVE, se detuvo la operación: {exc}", style="red", markup=False)
+        raise typer.Exit(code=3)
     options = [f"Política de offset: {offset_policy.value}"]
     if strip_unknown_headers:
         options.append("Cabeceras desconocidas del inicio: se quitan")
     if skip_near_empty:
         options.append("Letras casi vacías: se omiten")
+    if allow_full_rewrite:
+        options.append("Reescritura completa de archivos de audio: permitida")
     print_normalize_plan(
         changes, path, mode, encoding, console=console,
         limit=(0 if diff else 20) if limit is None else limit,
@@ -252,6 +275,31 @@ def revert(
         raise typer.Exit(code=2)
     print_revert(results, folder, console=console, dry_run=dry_run)
     if any(result.status in (backup.REVERT_CONFLICT, backup.REVERT_ERROR) for result in results):
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def recover(
+    folder: Path = typer.Argument(
+        ..., help="Carpeta de respaldo: <biblioteca>/ChoconostleLRCTool_back/<fecha-hora>."),
+) -> None:
+    """Resuelve escrituras interrumpidas: deja cada archivo como el original o como quedó aplicado."""
+    _safe_streams()
+    console = Console(highlight=False)
+    error_console = Console(stderr=True, highlight=False)
+    try:
+        results = backup.recover_session(folder.expanduser())
+    except (FileNotFoundError, ValueError, KeyError) as exc:
+        error_console.print(f"No se puede recuperar: {exc}", style="red", markup=False)
+        raise typer.Exit(code=2)
+    if not results:
+        console.print("No hay escrituras interrumpidas en este respaldo.")
+        return
+    names = {"complete": "había terminado", "untouched": "no se había modificado",
+             "restored": "RESTAURADO al original", "failed": "NO SE PUDO RECUPERAR"}
+    for name, status, message in results:
+        console.print(f"  {name}: {names.get(status, status)} - {message}", markup=False)
+    if any(status == "failed" for _n, status, _m in results):
         raise typer.Exit(code=1)
 
 

@@ -603,6 +603,15 @@ def print_normalize_plan(
               if change.status != STATUS_CHANGE and change.warnings
               and change.status not in (STATUS_SKIPPED, STATUS_ERROR, STATUS_DECISION)]
     listing("Avisos en letras sin cambios", others, "dim", text=lambda change: " ".join(change.warnings))
+    reasons = skipped_by_reason(changes)
+    if reasons:
+        _section(console, "Archivos de audio omitidos por motivo")
+        table = Table(show_header=False, box=None, padding=(0, 2))
+        table.add_column(justify="right")
+        table.add_column()
+        for label, paths in reasons:
+            table.add_row(str(len(paths)), Text(label))
+        console.print(table)
     listing("Omitidas", by_status.get(STATUS_SKIPPED, []), "dim")
     listing("Errores", by_status.get(STATUS_ERROR, []), "red")
 
@@ -626,6 +635,16 @@ def print_normalize_plan(
         console.print()
     console.print(Text(f"Respaldo guardado en: {session.folder}"))
     console.print(Text(f'Para deshacer: choconostle revert "{session.folder}"'))
+
+
+def skipped_by_reason(changes: list) -> list[tuple[str, set]]:
+    """[(motivo, {archivos})] de las letras incrustadas omitidas, de mayor a menor."""
+    from choconostle.normalizer import STATUS_SKIPPED, skip_reason_label
+    groups: dict[str, set] = {}
+    for change in changes:
+        if change.status == STATUS_SKIPPED and change.skip_reason:
+            groups.setdefault(skip_reason_label(change.skip_reason), set()).add(change.path)
+    return sorted(groups.items(), key=lambda entry: (-len(entry[1]), entry[0]))
 
 
 def print_revert(results: list, folder: Path, console: Console | None = None,

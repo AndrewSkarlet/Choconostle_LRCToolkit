@@ -28,8 +28,6 @@ from choconostle.scanner import scan_directory
 from choconostle.textio import decode_lyrics, encoding_family, split_lines
 
 GENERATOR = Path(__file__).resolve().parents[1] / "tools" / "generar_casos.py"
-# Formatos que la etapa ① todavía guarda con mutagen (no idénticos en bytes).
-REWRITTEN_BY_MUTAGEN = {".mp3", ".m4a", ".wv"}
 
 
 @pytest.fixture(scope="module")
@@ -290,34 +288,58 @@ def test_embedded_cases(plan_casos):
 # --apply y revert sobre toda la biblioteca
 # --------------------------------------------------------------------------
 
+def non_lyric_tags(path: Path):
+    """Etiquetas que no son letras, leídas con mutagen."""
+    from choconostle.tags import LYRICS_KEYS
+    state = tags_state(path)
+    if state is None:
+        return None
+    version, items = state if isinstance(state, tuple) else (None, state)
+
+    def is_lyric(key):
+        return key.lower() in LYRICS_KEYS or key.startswith(
+            ("USLT", "SYLT", "TXXX:LYRICS", "TXXX:UNSYNCEDLYRICS", "\xa9lyr"))
+    return version, [(key, value) for key, value in items if not is_lyric(key)]
+
+
+def test_ogg_requires_full_rewrite_by_default(plan_casos):
+    for name in ("42 OPUS LYRICS.opus", "43 OGG Vorbis LYRICS.ogg"):
+        change = plan_casos[f"10_incrustadas/{name} [LYRICS]"]
+        assert change.status == STATUS_SKIPPED and change.skip_reason == "full_rewrite"
+        assert "reescritura completa, requiere" in change.message
+
+
 def test_apply_then_revert_generated_library(biblioteca):
+    """Etapa ②: todo vuelve idéntico byte a byte, también MP3, M4A, WavPack y Ogg."""
     before = files_state(biblioteca)
-    normalizer, changes = plan(biblioteca)
+    normalizer, changes = plan(biblioteca, allow_full_rewrite=True)
     planned = {change.path for change in changes if change.status == STATUS_CHANGE}
-    audio_before = {path: audio_hash(path) for path in planned if path.suffix in REWRITTEN_BY_MUTAGEN}
-    tags_before = {path: tags_state(path) for path in planned if path.suffix in REWRITTEN_BY_MUTAGEN}
+    audio_files = {path for path in planned if path.suffix.lower() not in (".lrc", ".txt")}
+    assert {path.suffix for path in audio_files} >= {".flac", ".mp3", ".m4a", ".wv", ".opus", ".ogg"}
+    audio_before = {path: audio_hash(path) for path in audio_files}
+    tags_before = {path: non_lyric_tags(path) for path in audio_files}
 
     session = normalizer.apply(changes, biblioteca)
     assert all(item["status"] == backup.ITEM_APPLIED for item in session.manifest["items"])
     after = files_state(biblioteca)
     untouched = {key for key in before if biblioteca / key not in planned}
     assert all(after[key] == before[key] for key in untouched)
+    for path in audio_files:  # aplicado: audio y etiquetas ajenas a la letra intactos
+        assert audio_hash(path) == audio_before[path], path.name
+        assert non_lyric_tags(path) == tags_before[path], path.name
+    # El respaldo no contiene audio.
+    assert not [p for p in session.folder.rglob("*") if p.suffix.lower() in
+                (".flac", ".mp3", ".m4a", ".wv", ".opus", ".ogg", ".wav")]
+    assert not list(session.folder.glob("pendiente/*"))
 
     # Una segunda pasada no encuentra nada que cambiar.
-    _normalizer, again = plan(biblioteca)
+    _normalizer, again = plan(biblioteca, allow_full_rewrite=True)
     assert [change for change in again if change.status == STATUS_CHANGE] == []
 
     results = backup.revert(session.folder)
     assert {result.status for result in results} == {backup.REVERT_RESTORED}
-    restored = files_state(biblioteca)
-    for key, data in before.items():
-        path = biblioteca / key
-        if path.suffix in REWRITTEN_BY_MUTAGEN and path in planned:
-            # Etapa ②: se exigirá identidad en bytes; por ahora, audio y etiquetas.
-            assert audio_hash(path) == audio_before[path], key
-            assert tags_state(path) == tags_before[path], key
-        else:
-            assert restored[key] == data, key
+    assert all(not result.message for result in results)
+    assert files_state(biblioteca) == before
 
 
 def test_cli_diff_shows_everything_and_log(biblioteca):

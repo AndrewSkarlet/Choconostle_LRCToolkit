@@ -2,6 +2,32 @@
 
 ## Sin publicar - Fase 2.1
 
+### Pendiente
+- Etapa 4 (`convert-lyrics`): opción de desempate de codificación, p. ej. `--prefer-encoding cp1252`. Serviría cuando charset-normalizer devuelve candidatos empatados de familias distintas (como cp1250 y cp1252 en español) y hoy el archivo se considera ambiguo.
+
+### Etapa 2: letras incrustadas editadas byte a byte
+
+#### Agregado
+- Paquete `rawtags`: edición byte a byte de letras en ID3v2.3/2.4 (MP3, WAV, AIFF), FLAC, MP4/M4A y APEv2 (WavPack, APE). Solo cambian la letra y los campos de tamaño o relleno; las demás etiquetas, las portadas y el audio quedan idénticos.
+- Escritura verificada:
+  - Antes de escribir se comprueba que el archivo no cambió desde la planificación.
+  - Tras escribir se relee y se comprueban la región, las etiquetas ajenas a la letra (byte a byte) y el hash del audio. Si algo no coincide, se restaura el original.
+- Diario de escrituras (`pendiente/` en el respaldo) y comando `recover` para archivos que quedaron a medias tras una interrupción. `revert` recupera antes de revertir; `--apply` no empieza si hay escrituras sin resolver.
+- `--allow-full-rewrite`: permite reescribir el archivo completo (copia temporal verificada y reemplazo atómico) cuando la letra no cabe en el relleno. `--diff` muestra «reescritura completa, requiere X libres».
+- Resumen «Archivos de audio omitidos por motivo».
+- `revert` restaura las letras incrustadas idénticas byte a byte (parches inversos verificados con SHA-256) y la fecha de modificación.
+- Pruebas: tag sin relleno, letra más larga que el relleno, portada de 2 MB, ID3v2.3 y v2.4 (UTF-16, Latin-1, UTF-8), TXXX con varios valores, ID3v2.2/unsynchronisation/frame comprimido, M4A con `moov` antes de `mdat`, interrupción a mitad de escritura y recuperación (MP3, FLAC, WavPack, M4A), error de E/S, fallo de verificación y archivo cambiado entre planificación y aplicación.
+
+#### Corregido
+- Al guardar MP3, M4A y WavPack ya no se reescriben frames ni campos ajenos a la letra. Antes se añadían terminadores a TIT2/TPE1, se reordenaban frames, se añadía un átomo `free` o se cambiaba el orden de los campos APEv2. Ahora `revert` deja toda la biblioteca de casos idéntica byte a byte.
+- Los TXXX de letra con varios valores ya no se unen en uno.
+
+#### Incompatibilidades con la v0.2.0
+- **Ogg Vorbis y Opus ya no se modifican por defecto**: requieren `--allow-full-rewrite`, porque cambiar el comentario obliga a reescribir el archivo completo.
+- Algunos archivos que antes se guardaban con mutagen ahora se omiten con un motivo: ID3v2.2 (antes se convertía a 2.3/2.4), unsynchronisation, frames comprimidos, M4A sin relleno, y letras que no caben en el relleno sin `--allow-full-rewrite`.
+- Si el texto nuevo de un frame ID3 en Latin-1 no cabe en Latin-1, ya no se cambia la codificación del frame a UTF-16: se omite. Cambiarla será tarea de `convert-lyrics --id3-encoding`.
+- El manifiesto pasa a la versión 2 (con `edits` y parches). `revert` sigue leyendo la versión 1.
+
 ### Etapa 1: normalize-lyrics conserva los bytes
 
 #### Agregado

@@ -97,6 +97,9 @@ choconostle normalize-lyrics ~/Música --strip-headers --apply
 
 # 3. Deshacer, si hace falta
 choconostle revert ~/Música/ChoconostleLRCTool_back/2026-10-15_20-30-00
+
+# Si una escritura se interrumpió (p. ej. se desconectó la tarjeta SD)
+choconostle recover ~/Música/ChoconostleLRCTool_back/2026-10-15_20-30-00
 ```
 
 ### Modos (elige uno)
@@ -152,6 +155,7 @@ Mismas reglas de cabeceras y caracteres invisibles. Se conservan los saltos de l
 | `--strip-unknown-headers` | Quita también las cabeceras desconocidas del inicio. |
 | `--offset-policy skip\|first\|last\|sum` | Qué hacer con dos o más `[offset:]` (por defecto `skip`). |
 | `--skip-near-empty` | Omite las letras casi vacías. |
+| `--allow-full-rewrite` | Permite reescribir el archivo de audio completo cuando la letra no cabe en el relleno (y siempre en Ogg/Opus). Por defecto se omiten. |
 | `--only CARPETA_O_ÁLBUM` | Limita a una carpeta (ruta absoluta o relativa a la biblioteca) o a un álbum (nombre según las etiquetas). Se puede repetir. |
 | `--diff` | Muestra las diferencias línea por línea. Los caracteres invisibles se ven como `⟨U+200B⟩`. Con `--diff` se muestra la lista completa. |
 | `--limit N` | Máximo de canciones por lista en pantalla (0 = todas). Por defecto 20, o todas con `--diff`. Si se corta, se indica cuántas faltan. |
@@ -170,24 +174,53 @@ Con `--encoding` distinto de `keep`, un archivo se convierte **solo si todos sus
 - En `--diff` y `registro.txt` se indica la codificación detectada. Si no es fiable, la vista se marca como **aproximada**.
 - Si el texto parece mojibake (`CanciÃ³n`), se avisa, pero **no se corrige**.
 
+### Letras incrustadas: solo se tocan los bytes de la letra
+
+mutagen, al guardar, vuelve a escribir **todas** las etiquetas: en ID3 añade terminadores y reordena frames, en APEv2 ordena los campos por tamaño y en M4A añade un átomo `free`. Por eso las letras incrustadas se editan **byte a byte**: solo cambian el frame/campo/átomo de la letra y los campos de tamaño o relleno imprescindibles. Todo lo demás (otras etiquetas, portadas, audio) queda idéntico.
+
+| Formato | Cómo se escribe | Si la letra crece y no cabe |
+|---|---|---|
+| MP3, WAV, AIFF (ID3v2.3 / v2.4) | Solo el frame `USLT`/`SYLT`/`TXXX` de letra, con su misma codificación, idioma, descripción y terminadores. El tag conserva su tamaño usando el relleno. Cada valor de un `TXXX` de letra se procesa por separado (nunca se unen). | Reescritura completa (MP3); en WAV/AIFF se omite. |
+| FLAC | Solo el comentario de letra y el tamaño del bloque; el bloque `PADDING` compensa la diferencia. | Reescritura completa. |
+| M4A | Solo el átomo `data` de `©lyr` y los tamaños de los átomos que lo contienen. La diferencia la absorbe un `free` contiguo, o el archivo cambia de tamaño al final si `moov` va después de `mdat`. **Los offsets del audio nunca se tocan.** | Si `moov` va antes de `mdat` y no hay relleno: se omite («M4A sin relleno»). |
+| WavPack, APE (APEv2) | Solo el campo de letra y los tamaños de cabecera y pie, sin reordenar campos. El tag está al final: el audio no se mueve. | — |
+| Ogg Vorbis, Opus | Siempre **reescritura completa**: el comentario va en las primeras páginas y cambiar su tamaño renumera todas las demás. | — |
+| Matroska (`.mka`) | Solo lectura. | — |
+
+**Reescritura completa.** Cuando hay que desplazar el audio, el archivo se escribe en una copia temporal junto al original, se verifica y se reemplaza de forma atómica. Necesita espacio libre del tamaño del archivo. **Por defecto esos archivos se omiten**: `--diff` muestra «reescritura completa, requiere X libres» y `--allow-full-rewrite` la permite.
+
+**Se omiten, con el motivo contado en el resumen:** ID3v2.2 (mutagen lo convertiría a 2.3/2.4), ID3 con unsynchronisation, CRC o pie, frames de letra comprimidos o cifrados, frames de letra que no se pueden reconstruir idénticos, M4A sin relleno y reescrituras completas sin `--allow-full-rewrite`.
+
+**Antes y después de cada escritura:**
+1. Se comprueba que el archivo no cambió desde la planificación: tamaño, fecha de modificación y bytes de las etiquetas.
+2. Se calcula el hash de todo lo que está fuera de la región de etiquetas (el audio).
+3. Se guarda en el diario (`pendiente/` en el respaldo) la parte que se va a sobrescribir.
+4. Tras escribir se relee el archivo y se comprueba que la región quedó como estaba prevista, que todas las etiquetas que no son letras son idénticas byte a byte y que el hash del audio no cambió. Si algo no coincide, se restaura el original y se informa del error.
+
+Esto significa leer cada archivo de audio modificado dos veces completo.
+
+**Interrupciones.** Si la escritura se corta (corte de luz, tarjeta SD desconectada), el diario conserva lo necesario para recuperar el archivo. `choconostle recover <carpeta-de-respaldo>` deja cada archivo como el original o como quedó aplicado. `revert` hace lo mismo antes de revertir, y `normalize-lyrics --apply` se niega a empezar mientras haya escrituras sin resolver.
+
 ### Respaldo y reversión
 
 Antes de modificar nada, `--apply` crea:
 
 ```
 <biblioteca>/ChoconostleLRCTool_back/<fecha-hora>/
-├── originales/       texto original completo de cada letra modificada
+├── originales/       texto original de cada letra y parches de las ediciones incrustadas
+├── pendiente/        diario de escrituras en curso (vacío si todo terminó)
 ├── registro.txt      qué se cambió, con las diferencias línea por línea
-└── manifiesto.json   lo necesario para revertir
+└── manifiesto.json   lo necesario para revertir (versión 2)
 ```
 
-No se copian archivos de audio. El escáner ignora esta carpeta.
+No se copian archivos de audio ni portadas. De cada letra incrustada se guardan los «parches»: los bytes originales de la letra y de los campos de tamaño o relleno que cambiaron. El escáner ignora esta carpeta.
 
 `choconostle revert <carpeta>` restaura todas las letras del respaldo:
-- Solo restaura una letra si sigue como la dejó `normalize-lyrics`. Si la cambiaste después, la marca como **conflicto** y no la toca; `--force` la sobrescribe.
+- **Idénticas byte a byte**: los parches se aplican al revés y el resultado se comprueba con SHA-256 contra la región original antes de escribir. Se restaura también la fecha de modificación.
+- Solo restaura una letra si sigue como la dejó `normalize-lyrics`. Si la cambiaste después, la marca como **conflicto** y no la toca. En archivos `.lrc`/`.txt`, `--force` la sobrescribe.
 - `--dry-run` muestra qué restauraría sin cambiar nada.
 - Revertir dos veces no hace nada la segunda vez.
-- Matroska (`.mka`) solo se puede leer: sus letras incrustadas se reportan como omitidas.
+- Los respaldos de la v0.2.0 (manifiesto versión 1) se siguen pudiendo revertir con el método anterior.
 
 ## Estructura
 
@@ -199,7 +232,9 @@ src/choconostle/
 ├── audio.py        Detecta el códec real, con/sin pérdida, Dolby
 ├── tags.py         Lee etiquetas, letras y portadas incrustadas
 ├── matroska.py     Lector mínimo de .mka (mutagen no lo soporta)
-├── embedded.py     Lee y escribe letras incrustadas (ID3, Vorbis, MP4, APEv2)
+├── embedded.py     Elige el editor de letras incrustadas de cada formato
+├── rawtags/        Edición byte a byte: id3, flac, mp4, apev2, ogg y writer (escritura verificada, diario)
+├── legacy_embedded.py  Edición con mutagen de la v0.2.0 (solo para revertir respaldos antiguos)
 ├── normalizer.py   Fase 2: LyricsNormalizer (cabeceras, offset, codificación)
 ├── textio.py       Líneas sin pérdida, detección y conversión de codificación, diff
 ├── backup.py       Respaldo, manifiesto y revert
