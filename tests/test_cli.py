@@ -83,3 +83,10 @@ def test_scan_reports_nearly_empty(tmp_path):
     (library / "01.lrc").write_text("[ar:x]\n[00:00.00]Instrumental\n", encoding="utf-8")
     result = runner.invoke(app, ["scan", str(library), "--no-progress"])
     assert "Letras casi vacías (1)" in result.output
+
+
+def test_help_shows_header_brackets():
+    result = runner.invoke(app, ["normalize-lyrics", "--help"], env={"COLUMNS": "200"})
+    assert result.exit_code == 0
+    for text in ("[ar:]", "[ti:]", "[lr:]", "[hash:]", "[offset:]", "[length:]", "[xtrack:7]"):
+        assert text in result.output, text

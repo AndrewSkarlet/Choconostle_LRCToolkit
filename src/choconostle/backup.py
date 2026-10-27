@@ -19,7 +19,6 @@ Licencia: MIT
 
 from __future__ import annotations
 
-import difflib
 import hashlib
 import json
 import os
@@ -30,6 +29,7 @@ from pathlib import Path
 
 from choconostle.config import APP_NAME, APP_VERSION, BACKUP_DIR_NAME
 from choconostle.embedded import EmbeddedError, EmbeddedLyrics
+from choconostle.textio import diff_lines
 from choconostle.utils import write_file_atomic
 
 MANIFEST_NAME = "manifiesto.json"
@@ -80,9 +80,8 @@ def _python_value(value):
 
 
 def _diff(original: str, new: str) -> list[str]:
-    return list(difflib.unified_diff(
-        original.splitlines(), new.splitlines(), "original", "nuevo", lineterm="", n=1,
-    ))
+    """Diferencias por línea; los caracteres invisibles se ven como ⟨U+200B⟩."""
+    return diff_lines(original, new)
 
 
 # --------------------------------------------------------------------------
@@ -168,7 +167,7 @@ class BackupSession:
             f"Fecha: {self.manifest['created_at']}",
             f"Biblioteca: {self.root}",
             f"Modo: {mode_names.get(self.manifest['mode'], self.manifest['mode'])}",
-            f"Codificación de archivos: {self.manifest['encoding']}",
+            f"Codificación de archivos .lrc/.txt: {self.manifest['encoding']}",
             f"Letras modificadas: {sum(1 for i in self.manifest['items'] if i['status'] == ITEM_APPLIED)}"
             f" de {len(self.manifest['items'])}",
             "",
@@ -182,6 +181,13 @@ class BackupSession:
             if item["track"] and item["track"] != item["path"]:
                 lines.append(f"  Canción: {item['track']}")
             lines.append(f"  Cambios: {'; '.join(item['details']) or '-'}")
+            if getattr(change, "source_encoding", None):
+                lines.append(f"  Codificación de origen: {change.source_encoding}")
+            for warning in getattr(change, "warnings", []):
+                lines.append(f"  Aviso: {warning}")
+            if getattr(change, "approximate", False):
+                lines.append("  Vista aproximada: la codificación de origen no se pudo confirmar; "
+                             "el archivo se modifica byte a byte sin depender de ella.")
             lines.append(f"  Estado: {status_names.get(item['status'], item['status'])}"
                          + (f" ({item['error']})" if item["error"] else ""))
             lines.append(f"  Original guardado en: {item['original_copy']}")

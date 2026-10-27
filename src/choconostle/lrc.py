@@ -6,7 +6,8 @@ Análisis de letras (archivos .lrc / .txt y letras incrustadas).
 Responsabilidades:
 - Detectar si una letra está sincronizada (marcas de tiempo), sin
   importar la extensión del archivo.
-- Detectar cabeceras LRC ([ar:], [ti:], [al:], [length:], [offset:]...).
+- Detectar cabeceras LRC ([ar:], [ti:], [al:], [length:], [offset:]...),
+  también precedidas de caracteres invisibles (U+200B, U+FEFF...).
 - Detectar BOM y codificaciones distintas de UTF-8.
 
 Autor: Andrew
@@ -21,18 +22,21 @@ from pathlib import Path
 
 from choconostle.config import LRC_HEADER_TAGS, MAX_LYRICS_FILE_SIZE, NEARLY_EMPTY_MAX_LINES
 from choconostle.models.lyrics import SOURCE_EMBEDDED, SOURCE_EXTERNAL, LyricsInfo
+from choconostle.textio import line_contents, strip_invisible_prefix
 
 # [mm:ss], [mm:ss.xx], [mm:ss:xx], [mm:ss,xxx] al inicio de la línea
 # (puede haber varias seguidas: [00:12.00][01:30.00]Texto).
-TIMESTAMP_RE = re.compile(r"^\s*(?:\[\d{1,3}:\d{1,2}(?:[.:,]\d{1,3})?\]\s*)+")
+# Las expresiones usan re.ASCII: \s y \d no incluyen espacios ni dígitos
+# de otros alfabetos (U+3000, dígitos árabes...), que son texto de la letra.
+TIMESTAMP_RE = re.compile(r"^\s*(?:\[\d{1,3}:\d{1,2}(?:[.:,]\d{1,3})?\]\s*)+", re.ASCII)
 
 # [etiqueta:valor]; solo cuenta como cabecera si la etiqueta está en
 # LRC_HEADER_TAGS.
-HEADER_RE = re.compile(r"^\s*\[([A-Za-z#][A-Za-z0-9_#-]*)\s*:(.*)\]\s*$")
+HEADER_RE = re.compile(r"^\s*\[([A-Za-z#][A-Za-z0-9_#-]*)\s*:(.*)\]\s*$", re.ASCII)
 _HEADER_TAGS = set(LRC_HEADER_TAGS)
 
 # Marcas de tiempo por palabra del formato LRC mejorado: <mm:ss.xx>.
-WORD_TIMESTAMP_RE = re.compile(r"<\d{1,3}:\d{1,2}(?:[.:,]\d{1,3})?>")
+WORD_TIMESTAMP_RE = re.compile(r"<\d{1,3}:\d{1,2}(?:[.:,]\d{1,3})?>", re.ASCII)
 
 # El orden importa: el BOM de UTF-32 LE empieza igual que el de UTF-16 LE.
 _BOMS = [
@@ -45,15 +49,31 @@ _BOMS = [
 
 
 def header_name(line: str) -> str | None:
-    """Nombre de la cabecera LRC de la línea ("ar", "offset"...) o None."""
-    match = HEADER_RE.match(line)
-    if match and match.group(1).lower() in _HEADER_TAGS:
-        return match.group(1).lower()
+    """
+    Nombre de la cabecera LRC conocida de la línea ("ar", "offset"...) o
+    None. Admite caracteres invisibles antes del corchete.
+    """
+    key = header_key(line)
+    if key is not None and key.lower() in _HEADER_TAGS:
+        return key.lower()
     return None
 
 
+def header_key(line: str) -> str | None:
+    """
+    Clave de cualquier línea con forma [palabra:valor] (conocida o no),
+    o None. Las marcas de tiempo no cuentan.
+    """
+    _prefix, core = strip_invisible_prefix(line)
+    if TIMESTAMP_RE.match(core):
+        return None
+    match = HEADER_RE.match(core)
+    return match.group(1) if match else None
+
+
 def header_value(line: str) -> str:
-    match = HEADER_RE.match(line)
+    _prefix, core = strip_invisible_prefix(line)
+    match = HEADER_RE.match(core)
     return match.group(2).strip() if match else ""
 
 
@@ -83,7 +103,7 @@ def analyze_text(
     content_lines = 0
     headers: list[str] = []
 
-    for line in text.splitlines():
+    for line in line_contents(text):
         if not line.strip():
             continue
         timestamp = TIMESTAMP_RE.match(line)

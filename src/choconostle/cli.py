@@ -27,13 +27,14 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from choconostle.config import APP_CODENAME, APP_DESCRIPTION, APP_NAME, APP_VERSION
 from choconostle import backup
 from choconostle.normalizer import (
-    ENCODING_KEEP, ENCODING_UTF8, ENCODING_UTF8_BOM, MODE_STANDARDIZE, MODE_STRIP,
+    ENCODING_KEEP, MODE_STANDARDIZE, MODE_STRIP, OFFSET_FIRST, OFFSET_LAST, OFFSET_SKIP, OFFSET_SUM,
     LyricsNormalizer, SelectionError, select,
 )
 from choconostle.report import (
     build_report, print_normalize_plan, print_report, print_revert, write_json,
 )
 from choconostle.scanner import LibraryScan, scan_directory
+from choconostle.textio import EncodingOptionError, parse_target_encoding
 
 app = typer.Typer(
     help=APP_DESCRIPTION,
@@ -47,10 +48,11 @@ class GroupBy(str, Enum):
     tag = "tag"
 
 
-class LyricsEncoding(str, Enum):
-    utf8 = ENCODING_UTF8
-    utf8_bom = ENCODING_UTF8_BOM
-    keep = ENCODING_KEEP
+class OffsetPolicy(str, Enum):
+    skip = OFFSET_SKIP
+    first = OFFSET_FIRST
+    last = OFFSET_LAST
+    sum = OFFSET_SUM
 
 
 def _safe_streams() -> None:
@@ -133,15 +135,32 @@ def normalize_lyrics(
     path: Path = typer.Argument(..., help="Carpeta de la biblioteca musical."),
     strip_headers: bool = typer.Option(
         False, "--strip-headers",
-        help="Quita las cabeceras LRC ([ar:], [ti:], [by:]...). Aplica [offset:] antes de quitarlo.",
+        help="Quita las cabeceras LRC conocidas (\\[ar:], \\[ti:], \\[by:], \\[lr:], \\[hash:]...). "
+             "Si hay un único \\[offset:] válido, lo aplica a las marcas de tiempo antes de quitarlo.",
     ),
     standardize_headers: bool = typer.Option(
         False, "--standardize-headers",
-        help="Deja solo [ar:], [ti:], [al:] y [length:] con datos de las etiquetas de la canción.",
+        help="Deja solo \\[ar:], \\[ti:], \\[al:] y \\[length:] con datos de las etiquetas de la canción.",
     ),
-    encoding: LyricsEncoding = typer.Option(
-        LyricsEncoding.utf8, "--encoding", "-e",
-        help="Codificación de los .lrc/.txt: utf8 (sin BOM), utf8-bom o keep (conserva la actual).",
+    strip_unknown_headers: bool = typer.Option(
+        False, "--strip-unknown-headers",
+        help="Quita también las líneas con forma \\[palabra:valor] desconocidas del inicio "
+             "(p. ej. \\[xtrack:7]). Por defecto se conservan.",
+    ),
+    offset_policy: OffsetPolicy = typer.Option(
+        OffsetPolicy.skip, "--offset-policy",
+        help="Con dos o más \\[offset:]: skip (no tocar el archivo y listarlo), first, last o sum. "
+             "Un \\[offset:] inválido nunca se aplica.",
+    ),
+    skip_near_empty: bool = typer.Option(
+        False, "--skip-near-empty",
+        help="Omite las letras casi vacías (por defecto se procesan con un aviso).",
+    ),
+    encoding: str = typer.Option(
+        ENCODING_KEEP, "--encoding", "-e",
+        help="Codificación de los .lrc/.txt: keep (conserva la actual, por defecto), utf8 (sin BOM), "
+             "utf8-bom o cualquier códec de Python (cp1252, shift_jis, gbk...). Si algún carácter "
+             "no cabe, el archivo se omite. Para más opciones usa convert-lyrics.",
     ),
     only: Optional[List[str]] = typer.Option(
         None, "--only", "-o",
@@ -152,9 +171,10 @@ def normalize_lyrics(
         help="Aplica los cambios. Sin esta opción solo se muestra qué cambiaría.",
     ),
     diff: bool = typer.Option(False, "--diff", help="Muestra las diferencias línea por línea."),
-    limit: int = typer.Option(
-        20, "--limit", "-l",
-        help="Máximo de canciones por lista en pantalla (0 = sin límite).",
+    limit: Optional[int] = typer.Option(
+        None, "--limit", "-l",
+        help="Máximo de canciones por lista en pantalla (0 = sin límite). "
+             "Por defecto 20, o sin límite con --diff.",
     ),
     include_hidden: bool = typer.Option(
         False, "--include-hidden",
@@ -171,6 +191,11 @@ def normalize_lyrics(
         error_console.print("Elige un modo: --strip-headers o --standardize-headers.", style="red")
         raise typer.Exit(code=2)
     mode = MODE_STRIP if strip_headers else MODE_STANDARDIZE
+    try:
+        parse_target_encoding(encoding)
+    except EncodingOptionError as exc:
+        error_console.print(str(exc), style="red", markup=False)
+        raise typer.Exit(code=2)
 
     path = path.expanduser()
     if not path.is_dir():
@@ -184,12 +209,21 @@ def normalize_lyrics(
         error_console.print(str(exc), style="red", markup=False)
         raise typer.Exit(code=2)
 
-    normalizer = LyricsNormalizer(mode, encoding.value)
+    normalizer = LyricsNormalizer(
+        mode, encoding, strip_unknown=strip_unknown_headers,
+        offset_policy=offset_policy.value, skip_near_empty=skip_near_empty,
+    )
     changes = normalizer.plan(result, tracks, orphans)
     session = normalizer.apply(changes, path) if apply else None
+    options = [f"Política de offset: {offset_policy.value}"]
+    if strip_unknown_headers:
+        options.append("Cabeceras desconocidas del inicio: se quitan")
+    if skip_near_empty:
+        options.append("Letras casi vacías: se omiten")
     print_normalize_plan(
-        changes, path, mode, encoding.value, console=console, limit=limit,
-        show_diff=diff, session=session,
+        changes, path, mode, encoding, console=console,
+        limit=(0 if diff else 20) if limit is None else limit,
+        show_diff=diff, session=session, options=options,
     )
     if session is not None and any(item["status"] != backup.ITEM_APPLIED
                                    for item in session.manifest["items"]):

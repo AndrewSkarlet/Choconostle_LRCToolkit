@@ -1,23 +1,24 @@
 """
 normalizer.py
 
-Fase 2: normalización de letras (comando normalize-lyrics).
+Normalización de letras (comando normalize-lyrics).
 
 Dos modos:
-- strip: quita las cabeceras LRC ([ar:], [ti:], [by:], [offset:]...).
-  Si hay [offset:], lo aplica a cada marca de tiempo antes de quitarlo.
+- strip: quita las cabeceras LRC conocidas ([ar:], [ti:], [by:],
+  [offset:]...). Si hay un único [offset:] válido, lo aplica a cada marca
+  de tiempo antes de quitarlo.
 - standardize: deja solo un conjunto fijo de cabeceras (ar, ti, al,
   length) con datos tomados de las etiquetas de la canción. Si falta un
   dato, esa cabecera no se escribe.
 
 Se aplica a todas las copias de la letra: archivo .lrc/.txt y etiquetas
-incrustadas. Las letras casi vacías se marcan y no se modifican.
+incrustadas.
 
-Responsabilidades:
-- Transformar el texto de una letra (normalize_text).
-- Codificar los archivos de letra (encode_lyrics_file).
-- Planear los cambios de una biblioteca y aplicarlos con respaldo
-  (LyricsNormalizer).
+Principio: solo cambia lo que se pidió. Las líneas que no son cabeceras
+se conservan byte por byte (codificación, BOM, saltos de línea mixtos,
+caracteres invisibles), salvo las marcas de tiempo al aplicar un offset.
+Si algo no se puede hacer con seguridad (varios offsets, offset
+inválido), el archivo no se toca y se lista para revisión.
 
 Autor: Andrew
 Licencia: MIT
@@ -25,9 +26,7 @@ Licencia: MIT
 
 from __future__ import annotations
 
-import codecs
 import re
-import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -38,62 +37,50 @@ from choconostle.embedded import EmbeddedError, EmbeddedLyrics, Slot
 from choconostle.models.lyrics import SOURCE_EXTERNAL
 from choconostle.models.track import Track
 from choconostle.scanner import LibraryScan
+from choconostle.textio import (
+    LyricsDecodeError, TargetEncoding, UnencodableError, decode_lyrics, encode_text,
+    encoding_label, find_mojibake, parse_target_encoding, split_lines, strip_invisible_prefix,
+)
 from choconostle.utils import plural, write_file_atomic
 
 MODE_STRIP = "strip"
 MODE_STANDARDIZE = "standardize"
 
+ENCODING_KEEP = "keep"
 ENCODING_UTF8 = "utf8"
 ENCODING_UTF8_BOM = "utf8-bom"
-ENCODING_KEEP = "keep"
+
+OFFSET_SKIP = "skip"
+OFFSET_FIRST = "first"
+OFFSET_LAST = "last"
+OFFSET_SUM = "sum"
+OFFSET_POLICIES = (OFFSET_SKIP, OFFSET_FIRST, OFFSET_LAST, OFFSET_SUM)
 
 KIND_FILE = "file"
 KIND_EMBEDDED = "embedded"
 
 STATUS_CHANGE = "change"
 STATUS_UNCHANGED = "unchanged"
-STATUS_NEARLY_EMPTY = "nearly_empty"
+STATUS_DECISION = "decision"
+"""No se tocó: requiere una decisión del usuario (offsets)."""
 STATUS_SKIPPED = "skipped"
 STATUS_ERROR = "error"
 
-_BOM_BY_ENCODING = {
-    "utf-8": codecs.BOM_UTF8,
-    "utf-16-le": codecs.BOM_UTF16_LE,
-    "utf-16-be": codecs.BOM_UTF16_BE,
-    "utf-32-le": codecs.BOM_UTF32_LE,
-    "utf-32-be": codecs.BOM_UTF32_BE,
-}
+_TIMESTAMP_PART_RE = re.compile(r"([\[<])(\d{1,3}):(\d{1,2})(?:([.:,])(\d{1,3}))?([\]>])", re.ASCII)
+_INLINE_TIMESTAMP_RE = re.compile(r"\[\d{1,3}:\d{1,2}(?:[.:,]\d{1,3})?\]", re.ASCII)
+_OFFSET_VALUE_RE = re.compile(r"([+-]?)\s*(\d+)", re.ASCII)
 
-# Codificaciones adivinadas (sin BOM ni UTF válido): no hay certeza de que
-# la detección sea correcta.
-_GUESSED_ENCODINGS = {"cp1252", "latin-1"}
-
-# Signos no ASCII habituales en letras en español, portugués, francés...
-_LATIN_PUNCTUATION = set("¡¿«»°ºª·–—‘’“”…€´¨")
-
-_TIMESTAMP_PART_RE = re.compile(r"([\[<])(\d{1,3}):(\d{1,2})(?:([.:,])(\d{1,3}))?([\]>])")
+# Clases de línea.
+_SYNCED = "synced"
+_HEADER = "header"
+_UNKNOWN = "unknown"
+_BLANK = "blank"
+_TEXT = "text"
 
 
 # --------------------------------------------------------------------------
-# Transformación del texto
+# Marcas de tiempo
 # --------------------------------------------------------------------------
-
-@dataclass
-class TextResult:
-    text: str
-    synced: bool = False
-    nearly_empty: bool = False
-    content_lines: int = 0
-    removed_headers: list[str] = field(default_factory=list)
-    written_headers: list[str] = field(default_factory=list)
-    offset_ms: int | None = None
-    shifted: int = 0
-    clamped: int = 0
-    removed_bom: bool = False
-    newline: str = "LF"
-    """Saltos de línea originales: "LF", "CRLF" o "CR"."""
-    warnings: list[str] = field(default_factory=list)
-
 
 def _format_timestamp(match: re.Match, total_ms: int) -> str:
     """Reescribe una marca de tiempo con el mismo estilo que la original."""
@@ -126,11 +113,13 @@ def shift_line(line: str, offset_ms: int) -> tuple[str, int, int]:
 
     Según el formato LRC, un offset positivo adelanta la letra (aparece
     antes): nuevo_tiempo = tiempo - offset. Los tiempos negativos quedan
-    en 0.
+    en 0. Se ajustan las marcas del inicio [mm:ss.xx] y las marcas por
+    palabra <mm:ss.xx>; los corchetes dentro del texto no se tocan.
 
     Retorna (línea, marcas_modificadas, marcas_recortadas_a_cero).
     """
-    leading = lrc.TIMESTAMP_RE.match(line)
+    prefix, core = strip_invisible_prefix(line)
+    leading = lrc.TIMESTAMP_RE.match(core)
     if not leading:
         return line, 0, 0
     shifted = clamped = 0
@@ -144,13 +133,42 @@ def shift_line(line: str, offset_ms: int) -> tuple[str, int, int]:
         shifted += 1
         return _format_timestamp(match, new_ms)
 
-    # Marcas al inicio [mm:ss.xx] y marcas por palabra <mm:ss.xx> del resto.
-    head = _TIMESTAMP_PART_RE.sub(replace, line[:leading.end()])
-    tail = re.sub(lrc.WORD_TIMESTAMP_RE.pattern,
-                  lambda m: _TIMESTAMP_PART_RE.sub(replace, m.group(0)),
-                  line[leading.end():])
-    return head + tail, shifted, clamped
+    head = _TIMESTAMP_PART_RE.sub(replace, core[:leading.end()])
+    tail = lrc.WORD_TIMESTAMP_RE.sub(lambda m: _TIMESTAMP_PART_RE.sub(replace, m.group(0)),
+                                     core[leading.end():])
+    return prefix + head + tail, shifted, clamped
 
+
+def _offset_problem(line: str) -> str | None:
+    """Motivo por el que no se puede aplicar un offset a esta línea, o None."""
+    _prefix, core = strip_invisible_prefix(line)
+    leading = lrc.TIMESTAMP_RE.match(core)
+    if not leading:
+        return None
+    rest = core[leading.end():]
+    tokens = list(_TIMESTAMP_PART_RE.finditer(core[:leading.end()]))
+    tokens += [part for word in lrc.WORD_TIMESTAMP_RE.finditer(rest)
+               for part in _TIMESTAMP_PART_RE.finditer(word.group())]
+    for token in tokens:
+        if int(token.group(3)) >= 60:
+            return f"marca de tiempo inválida {token.group()}"
+    if _INLINE_TIMESTAMP_RE.search(lrc.WORD_TIMESTAMP_RE.sub("", rest)):
+        return "marcas [mm:ss] dentro del texto (estilo QQ o texto entre corchetes)"
+    return None
+
+
+def parse_offset(value: str) -> int | None:
+    """"+500" -> 500; "-300" -> -300; "250" -> 250; "medio segundo" -> None."""
+    match = _OFFSET_VALUE_RE.fullmatch(value.strip())
+    if not match:
+        return None
+    number = int(match.group(2))
+    return -number if match.group(1) == "-" else number
+
+
+# --------------------------------------------------------------------------
+# Cabeceras estándar
+# --------------------------------------------------------------------------
 
 def build_headers(track: Track | None) -> list[tuple[str, str]]:
     """
@@ -176,6 +194,10 @@ def build_headers(track: Track | None) -> list[tuple[str, str]]:
     return headers
 
 
+def header_lines(headers: list[tuple[str, str]]) -> list[str]:
+    return [f"[{name}:{value}]" for name, value in headers]
+
+
 def _format_length(duration: float | None) -> str | None:
     if not duration:
         return None
@@ -183,146 +205,208 @@ def _format_length(duration: float | None) -> str | None:
     return f"{total // 60:02d}:{total % 60:02d}"
 
 
-def normalize_text(text: str, mode: str, headers: list[tuple[str, str]]) -> TextResult:
+# --------------------------------------------------------------------------
+# Transformación del texto
+# --------------------------------------------------------------------------
+
+@dataclass
+class TextResult:
+    text: str
+    changed: bool = False
+    synced: bool = False
+    content_lines: int = 0
+    nearly_empty: bool = False
+    empty_result: bool = False
+    """Al quitar las cabeceras no quedaría letra: no se escribe."""
+    removed_headers: list[str] = field(default_factory=list)
+    removed_unknown: list[str] = field(default_factory=list)
+    unknown_headers: list[str] = field(default_factory=list)
+    """Cabeceras desconocidas que se conservan ([xtrack:]...)."""
+    written_headers: list[str] = field(default_factory=list)
+    offsets: list[str] = field(default_factory=list)
+    """Valores de todas las cabeceras [offset:], tal como aparecen."""
+    offset_ms: int | None = None
+    """Offset aplicado."""
+    shifted: int = 0
+    clamped: int = 0
+    decision: str | None = None
+    """Si no es None, el texto no se modificó y requiere revisión."""
+    warnings: list[str] = field(default_factory=list)
+    entries: list | None = None
+    """SYLT: entradas (texto, tiempo) resultantes."""
+
+
+def normalize_text(
+    text: str,
+    mode: str,
+    block: list[str] | None = None,
+    strip_unknown: bool = False,
+    offset_policy: str = OFFSET_SKIP,
+) -> TextResult:
     """
     Normaliza el texto de una letra.
 
-    - Las letras casi vacías no se modifican (nearly_empty=True).
-    - Las letras sin marcas de tiempo solo cambian si tienen cabeceras.
-    - Los saltos de línea se convierten a LF.
+    - Separa líneas solo por CRLF, CR y LF y conserva cada delimitador.
+    - Quita las cabeceras conocidas (en cualquier posición) y, con
+      strip_unknown, las líneas [palabra:valor] del bloque inicial.
+    - Quita las líneas vacías que quedan al inicio justo después de las
+      cabeceras retiradas.
+    - `block`: líneas de cabecera ya formateadas que se escriben al inicio
+      (solo modo standardize).
     """
     result = TextResult(text=text)
-    if text.startswith("﻿"):
-        text = text[1:]
-        result.removed_bom = True
-    if "\r\n" in text:
-        result.newline = "CRLF"
-    elif "\r" in text:
-        result.newline = "CR"
-    trailing_newline = text.endswith(("\n", "\r"))
+    lines = split_lines(text)
+    kinds: list[str] = []
+    names: list[str | None] = []
+    in_initial_block = True
 
-    lines = text.splitlines()
-    header_lines: dict[int, str] = {}
-    for index, line in enumerate(lines):
-        timestamp = lrc.TIMESTAMP_RE.match(line)
+    for content, _eol in lines:
+        _prefix, core = strip_invisible_prefix(content)
+        timestamp = lrc.TIMESTAMP_RE.match(core)
+        name = None
         if timestamp:
+            kind = _SYNCED
             result.synced = True
-            if lrc.has_text_after_timestamps(line, timestamp):
+            if lrc.has_text_after_timestamps(core, timestamp):
                 result.content_lines += 1
-            continue
-        name = lrc.header_name(line)
-        if name:
-            header_lines[index] = name
-            if name == "offset":
-                value = lrc.header_value(line)
-                try:
-                    result.offset_ms = int(value.replace(" ", ""))
-                except ValueError:
-                    result.warnings.append(f"[offset:{value}] no es un número; no se aplicó.")
-            continue
-        if line.strip():
+        elif lrc.header_name(content):
+            kind = _HEADER
+            name = lrc.header_name(content)
+        elif in_initial_block and lrc.header_key(content):
+            kind = _UNKNOWN
+            name = lrc.header_key(content)
+        elif not content.strip(" \t"):
+            kind = _BLANK
+        else:
+            kind = _TEXT
             result.content_lines += 1
+        if kind in (_SYNCED, _TEXT):
+            in_initial_block = False
+        kinds.append(kind)
+        names.append(name)
 
-    if result.content_lines <= NEARLY_EMPTY_MAX_LINES:
-        result.nearly_empty = True
-        result.text = text if not result.removed_bom else "﻿" + text
-        result.removed_bom = False
+    result.nearly_empty = result.content_lines <= NEARLY_EMPTY_MAX_LINES
+    if result.content_lines == 0:
+        result.warnings.append("Vacía (sin líneas con texto).")
+    elif result.nearly_empty:
+        result.warnings.append(f"Casi vacía: solo {plural(result.content_lines, 'línea')} con texto.")
+
+    # Offsets: solo uno válido se aplica; el resto requiere decisión.
+    offset_values = [lrc.header_value(content) for (content, _eol), kind, name
+                     in zip(lines, kinds, names) if kind == _HEADER and name == "offset"]
+    result.offsets = offset_values
+    parsed = [parse_offset(value) for value in offset_values]
+    if any(value is None for value in parsed):
+        invalid = ", ".join(f"[offset:{value}]" for value, number in zip(offset_values, parsed) if number is None)
+        result.decision = f"offset inválido {invalid}: no se puede interpretar; corrígelo a mano."
         return result
+    if len(parsed) >= 2:
+        if offset_policy == OFFSET_SKIP:
+            values = ", ".join(offset_values)
+            result.decision = (f"{len(parsed)} cabeceras [offset:] ({values}); "
+                               "elige --offset-policy first, last o sum.")
+            return result
+        chosen = {OFFSET_FIRST: parsed[0], OFFSET_LAST: parsed[-1], OFFSET_SUM: sum(parsed)}[offset_policy]
+    else:
+        chosen = parsed[0] if parsed else None
 
-    rewrite = bool(header_lines) or (mode == MODE_STANDARDIZE and result.synced)
-    if rewrite:
-        body = [line for index, line in enumerate(lines) if index not in header_lines]
-        if result.offset_ms and result.synced:
-            shifted_body = []
-            for line in body:
-                line, shifted, clamped = shift_line(line, result.offset_ms)
-                result.shifted += shifted
-                result.clamped += clamped
-                shifted_body.append(line)
-            body = shifted_body
-        while body and not body[0].strip():
-            body.pop(0)
-        result.removed_headers = [header_lines[index] for index in sorted(header_lines)]
-        if mode == MODE_STANDARDIZE:
-            block = [f"[{name}:{value}]" for name, value in headers]
-            result.written_headers = [name for name, _value in headers]
-            body = block + body
-        lines = body
+    if chosen:
+        for (content, _eol), kind in zip(lines, kinds):
+            if kind == _SYNCED:
+                problem = _offset_problem(content)
+                if problem:
+                    result.decision = f"no se puede aplicar [offset:{chosen}]: {problem}."
+                    return result
 
-    new_text = "\n".join(lines)
-    if trailing_newline and new_text:
-        new_text += "\n"
-    result.text = new_text
+    # Líneas que se quitan.
+    remove: set[int] = set()
+    after_removed = False
+    kept_in_block = False
+    seen_content = False
+    for index, kind in enumerate(kinds):
+        if kind == _HEADER:
+            remove.add(index)
+            result.removed_headers.append(names[index])
+            after_removed = True
+        elif kind == _UNKNOWN:
+            if strip_unknown:
+                remove.add(index)
+                result.removed_unknown.append(names[index])
+                after_removed = True
+            else:
+                result.unknown_headers.append(names[index])
+                kept_in_block = True
+        elif kind == _BLANK:
+            if after_removed and not kept_in_block and not seen_content:
+                remove.add(index)
+        else:
+            kept_in_block = seen_content = True
+
+    new_lines: list[tuple[str, str]] = []
+    for index, ((content, eol), kind) in enumerate(zip(lines, kinds)):
+        if index in remove:
+            continue
+        if kind == _SYNCED and chosen:
+            content, shifted, clamped = shift_line(content, chosen)
+            result.shifted += shifted
+            result.clamped += clamped
+        new_lines.append((content, eol))
+    if chosen and result.synced:
+        result.offset_ms = chosen
+    if result.clamped:
+        result.warnings.append(f"{plural(result.clamped, 'marca')} quedan en 00:00 por el offset.")
+
+    if mode == MODE_STANDARDIZE and block and (result.synced or remove):
+        newline = next((eol for _content, eol in lines if eol), "\n")
+        result.written_headers = [lrc.header_name(line) or line for line in block]
+        new_lines = [(line, newline) for line in block] + new_lines
+
+    body = [(content, eol) for (content, eol), kind in zip(lines, kinds) if kind in (_SYNCED, _TEXT)]
+    result.text = "".join(content + eol for content, eol in new_lines)
+    result.changed = result.text != text
+    result.empty_result = result.changed and not any(content.strip() for content, _eol in body)
     return result
 
 
-# --------------------------------------------------------------------------
-# Codificación de archivos
-# --------------------------------------------------------------------------
-
-class LyricsEncodingError(Exception):
-    """El texto no se puede guardar en la codificación pedida."""
-
-
-def looks_like_latin_text(text: str) -> bool:
+def normalize_sylt(entries: list, strip_unknown: bool = False) -> TextResult:
     """
-    True si un texto decodificado como Windows-1252/Latin-1 parece texto
-    real en un idioma latino (y no un archivo en otra codificación, como
-    Shift-JIS o GBK, leído mal).
+    SYLT guarda pares (texto, tiempo) sin marcas en el texto: solo se
+    quitan las entradas que son cabeceras.
     """
-    run = 0
-    for char in text:
-        if ord(char) < 128:
-            run = 0
+    texts = [text for text, _time in entries]
+    result = TextResult(text="\n".join(texts))
+    content = [text for text in texts if text.strip() and not lrc.header_key(text)]
+    result.synced = True
+    result.content_lines = len(content)
+    result.nearly_empty = result.content_lines <= NEARLY_EMPTY_MAX_LINES
+    if not content:
+        result.warnings.append("Vacía (sin líneas con texto).")
+    elif result.nearly_empty:
+        result.warnings.append(f"Casi vacía: solo {plural(len(content), 'línea')} con texto.")
+    if any(lrc.header_name(text) == "offset" for text in texts):
+        result.decision = "SYLT con [offset:]: los tiempos de SYLT no se ajustan automáticamente."
+        return result
+    kept = []
+    in_block = True
+    for text, time in entries:
+        name = lrc.header_name(text)
+        key = lrc.header_key(text)
+        if name:
+            result.removed_headers.append(name)
             continue
-        run += 1
-        if run >= 3:
-            return False
-        if char in _LATIN_PUNCTUATION:
-            continue
-        if not unicodedata.category(char).startswith("L"):
-            return False
-        if not ("À" <= char <= "ſ"):
-            return False
-    return True
-
-
-def encode_lyrics_file(
-    text: str,
-    option: str,
-    original_encoding: str,
-    original_bom: bool,
-) -> tuple[bytes, str, bool, list[str]]:
-    """
-    Codifica el texto de un archivo de letra.
-
-    Retorna (bytes, codificación_final, con_bom, avisos).
-    """
-    warnings: list[str] = []
-    keep = option == ENCODING_KEEP
-    if not keep and original_encoding in _GUESSED_ENCODINGS and not looks_like_latin_text(text):
-        warnings.append(
-            "La codificación no es UTF-8 y no se pudo confirmar cuál es; "
-            "se conserva la original para no dañar el texto."
-        )
-        keep = True
-
-    if keep:
-        encoding = "utf-8" if original_encoding == "ascii" else original_encoding
-        bom = _BOM_BY_ENCODING.get(encoding, b"") if original_bom else b""
-        try:
-            data = text.encode(encoding)
-        except UnicodeEncodeError as exc:
-            raise LyricsEncodingError(
-                f"El texto nuevo no cabe en {encoding} ({exc.object[exc.start:exc.end]!r}); "
-                "usa --encoding utf8."
-            ) from exc
-        return bom + data, encoding, bool(bom), warnings
-
-    data = text.encode("utf-8")
-    if option == ENCODING_UTF8_BOM:
-        return codecs.BOM_UTF8 + data, "utf-8", True, warnings
-    return data, "utf-8", False, warnings
+        if key and in_block:
+            if strip_unknown:
+                result.removed_unknown.append(key)
+                continue
+            result.unknown_headers.append(key)
+        elif text.strip():
+            in_block = False
+        kept.append((text, time))
+    result.changed = kept != list(entries)
+    result.empty_result = result.changed and not content
+    result.text = "\n".join(text for text, _time in kept)
+    result.entries = kept
+    return result
 
 
 # --------------------------------------------------------------------------
@@ -386,22 +470,28 @@ class LyricsChange:
     """Nombre del archivo de letra, o etiqueta (LYRICS, USLT...)."""
     status: str = STATUS_UNCHANGED
     details: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
     message: str | None = None
+    nearly_empty: bool = False
+    unknown_headers: list[str] = field(default_factory=list)
 
     # Archivos.
     original_bytes: bytes | None = None
     new_bytes: bytes | None = None
     original_mtime: float | None = None
+    source_encoding: str | None = None
+    """Codificación de origen como texto legible ("UTF-8 con BOM", "detectada Shift-JIS"...)."""
 
     # Incrustadas.
     slot: Slot | None = None
     original_value: object = None
     new_value: object = None
-    new_id3_encoding: int | None = None
 
     # Texto (para el registro y la vista previa).
     original_text: str = ""
     new_text: str = ""
+    approximate: bool = False
+    """La vista del texto es aproximada (codificación no confirmada)."""
 
     @property
     def track_path(self) -> Path | None:
@@ -416,35 +506,36 @@ def _describe(result: TextResult) -> list[str]:
                if name not in result.written_headers]
     if removed:
         details.append("quita " + " ".join(f"[{name}:]" for name in removed))
+    if result.removed_unknown:
+        details.append("quita desconocidas " + " ".join(
+            f"[{name}:]" for name in dict.fromkeys(result.removed_unknown)))
     if result.shifted:
         sign = "+" if result.offset_ms > 0 else ""
-        text = f"aplica offset {sign}{result.offset_ms} ms a {result.shifted} marcas"
-        if result.clamped:
-            text += f" ({result.clamped} quedan en 00:00)"
-        details.append(text)
-    if result.removed_bom:
-        details.append("quita BOM")
-    if result.newline != "LF":
-        details.append(f"saltos de línea {result.newline} -> LF")
+        details.append(f"aplica offset {sign}{result.offset_ms} ms a {plural(result.shifted, 'marca')}")
     return details
-
-
-_ENCODING_NAMES = {
-    "utf-8": "UTF-8", "ascii": "UTF-8", "utf-16-le": "UTF-16 LE", "utf-16-be": "UTF-16 BE",
-    "utf-32-le": "UTF-32 LE", "utf-32-be": "UTF-32 BE", "cp1252": "Windows-1252", "latin-1": "Latin-1",
-}
 
 
 class LyricsNormalizer:
     """Planea y aplica la normalización de letras de una biblioteca."""
 
-    def __init__(self, mode: str, encoding: str = ENCODING_UTF8):
+    def __init__(
+        self,
+        mode: str,
+        encoding: str = ENCODING_KEEP,
+        strip_unknown: bool = False,
+        offset_policy: str = OFFSET_SKIP,
+        skip_near_empty: bool = False,
+    ):
         if mode not in (MODE_STRIP, MODE_STANDARDIZE):
             raise ValueError(f"Modo desconocido: {mode}")
-        if encoding not in (ENCODING_UTF8, ENCODING_UTF8_BOM, ENCODING_KEEP):
-            raise ValueError(f"Codificación desconocida: {encoding}")
+        if offset_policy not in OFFSET_POLICIES:
+            raise ValueError(f"Política de offset desconocida: {offset_policy}")
         self.mode = mode
         self.encoding = encoding
+        self.target: TargetEncoding | None = parse_target_encoding(encoding)
+        self.strip_unknown = strip_unknown
+        self.offset_policy = offset_policy
+        self.skip_near_empty = skip_near_empty
 
     # ------------------------------------------------------------------
 
@@ -489,6 +580,31 @@ class LyricsNormalizer:
                 changes.append(self._plan_file(path, None, []))
         return changes
 
+    def _apply_text_rules(self, change: LyricsChange, result: TextResult) -> bool:
+        """
+        Estado común de archivos e incrustadas a partir del resultado.
+
+        Retorna True si el cambio puede seguir (hay algo que escribir o
+        convertir); False si ya quedó decidido (decisión, omitido...).
+        """
+        change.warnings += result.warnings
+        change.nearly_empty = result.nearly_empty
+        change.unknown_headers = list(dict.fromkeys(result.unknown_headers))
+        if result.decision:
+            change.status = STATUS_DECISION
+            change.message = result.decision
+            return False
+        if self.skip_near_empty and result.nearly_empty:
+            change.status = STATUS_SKIPPED
+            change.message = "Casi vacía: omitida por --skip-near-empty."
+            return False
+        if result.empty_result:
+            change.status = STATUS_SKIPPED
+            change.message = "Quedaría vacía al quitar las cabeceras: no se escribe."
+            return False
+        change.details = _describe(result)
+        return True
+
     def _plan_file(self, path: Path, track: Track | None, headers) -> LyricsChange:
         change = LyricsChange(kind=KIND_FILE, path=path, track=track, label=path.name)
         try:
@@ -500,58 +616,92 @@ class LyricsNormalizer:
             return change
         change.original_bytes = data
 
-        text, encoding, has_bom = lrc.decode_bytes(data)
-        # Solo se modifica un archivo si se puede volver a codificar igual:
-        # garantiza que no hubo bytes inválidos que se perderían.
-        check_encoding = "utf-8" if encoding == "ascii" else encoding
-        check_bom = _BOM_BY_ENCODING.get(check_encoding, b"") if has_bom else b""
         try:
-            roundtrip = check_bom + text.encode(check_encoding)
-        except UnicodeEncodeError:
-            roundtrip = None
-        if roundtrip != data:
+            decoded = decode_lyrics(data)
+        except LyricsDecodeError as exc:
             change.status = STATUS_ERROR
-            change.message = f"El archivo tiene bytes inválidos para {check_encoding}; no se modifica."
+            change.message = f"{exc} No se modifica."
+            return change
+        change.source_encoding = decoded.label
+        change.original_text, change.approximate = decoded.display(decoded.text)
+        change.new_text = change.original_text
+        if change.approximate:
+            change.warnings.append(f"Vista aproximada: {decoded.label}.")
+        mojibake = [] if change.approximate else find_mojibake(change.original_text)
+        if mojibake:
+            sample = ", ".join(f"«{bad}» → «{good}»" for bad, good in mojibake)
+            change.warnings.append(f"Posible mojibake ({sample}); no se corrige.")
+
+        block: list[str] = []
+        if self.mode == MODE_STANDARDIZE:
+            block, problem = self._block_for(decoded, header_lines(headers))
+            if problem:
+                change.status = STATUS_SKIPPED
+                change.message = problem
+                return change
+
+        result = normalize_text(decoded.text, self.mode, block, self.strip_unknown, self.offset_policy)
+        if not self._apply_text_rules(change, result):
             return change
 
-        result = normalize_text(text, self.mode, headers)
-        change.original_text = text
-        if result.nearly_empty:
-            change.status = STATUS_NEARLY_EMPTY
-            change.message = _nearly_empty_message(result)
-            return change
+        new_view = result.text
+        if self.target is None:
+            new_bytes = decoded.encode(new_view)
+            change.new_text = decoded.display(new_view)[0]
+        else:
+            real = decoded.real_text(new_view)
+            if real is None:
+                change.status = STATUS_SKIPPED
+                change.message = (f"No se convierte: {decoded.label}. "
+                                  "Indica la codificación con convert-lyrics --source-encoding.")
+                change.details = []
+                return change
+            try:
+                new_bytes = encode_text(real, self.target)
+            except UnencodableError as exc:
+                change.status = STATUS_SKIPPED
+                change.message = f"No se convierte: {exc}."
+                change.details = []
+                return change
+            change.new_text = real
+            source = decoded.source_encoding
+            if encoding_label(source) != encoding_label(self.target.codec):
+                change.details.append(f"{encoding_label(source)} -> {encoding_label(self.target.codec)}")
+            if decoded.bom and not self.target.bom:
+                change.details.append("quita BOM")
+            elif self.target.bom and not decoded.bom:
+                change.details.append("agrega BOM")
 
-        new_text = result.text
-        if new_text and not new_text.endswith("\n"):
-            new_text += "\n"
-        try:
-            new_bytes, new_encoding, new_bom, warnings = encode_lyrics_file(
-                new_text, self.encoding, encoding, has_bom)
-        except LyricsEncodingError as exc:
-            change.status = STATUS_ERROR
-            change.message = str(exc)
-            return change
-
-        change.details = _describe(result)
-        # El BOM y la codificación de un archivo los decide --encoding.
-        change.details = [detail for detail in change.details if detail != "quita BOM"]
-        if has_bom and not new_bom:
-            change.details.append("quita BOM")
-        elif new_bom and not has_bom:
-            change.details.append("agrega BOM")
-        if _ENCODING_NAMES.get(encoding, encoding) != _ENCODING_NAMES.get(new_encoding, new_encoding):
-            change.details.append(
-                f"{_ENCODING_NAMES.get(encoding, encoding)} -> {_ENCODING_NAMES.get(new_encoding, new_encoding)}")
-        if text.strip() and not text.endswith(("\n", "\r")):
-            change.details.append("agrega salto de línea final")
-        change.details += result.warnings + warnings
-
-        change.new_text = new_text
         change.new_bytes = new_bytes
         change.status = STATUS_CHANGE if new_bytes != data else STATUS_UNCHANGED
         if change.status == STATUS_UNCHANGED:
-            change.details = result.warnings + warnings
+            change.details = []
         return change
+
+    @staticmethod
+    def _block_for(decoded, lines: list[str]) -> tuple[list[str], str | None]:
+        """
+        Cabeceras nuevas en el "espacio" de texto del archivo.
+
+        En un archivo de 8 bits cuya codificación no se confirmó, solo se
+        pueden escribir cabeceras ASCII.
+        """
+        if decoded.exact:
+            return lines, None
+        block = []
+        for line in lines:
+            if line.isascii():
+                block.append(line)
+                continue
+            encoding = decoded.source_encoding
+            if encoding is None:
+                return [], (f"No se pueden escribir cabeceras con caracteres no ASCII: {decoded.label}. "
+                            "Convierte primero con convert-lyrics --source-encoding.")
+            try:
+                block.append(line.encode(encoding).decode(decoded.codec))
+            except UnicodeEncodeError:
+                return [], f"La cabecera {line} no se puede representar en {encoding_label(encoding)}."
+        return block, None
 
     def _plan_embedded(self, track: Track, headers) -> list[LyricsChange]:
         try:
@@ -578,47 +728,28 @@ class LyricsNormalizer:
 
     def _plan_text_slot(self, change: LyricsChange, slot: Slot, headers) -> None:
         text = slot.value or ""
-        result = normalize_text(text, self.mode, headers)
-        change.original_text = text
-        if result.nearly_empty:
-            change.status = STATUS_NEARLY_EMPTY
-            change.message = _nearly_empty_message(result)
+        change.original_text = change.new_text = text
+        block = header_lines(headers) if self.mode == MODE_STANDARDIZE else []
+        result = normalize_text(text, self.mode, block, self.strip_unknown, self.offset_policy)
+        if not self._apply_text_rules(change, result):
             return
         change.new_text = result.text
         change.new_value = result.text
-        change.details = _describe(result) + result.warnings
-        change.status = STATUS_CHANGE if result.text != text else STATUS_UNCHANGED
+        change.status = STATUS_CHANGE if result.changed else STATUS_UNCHANGED
+        if not result.changed:
+            change.details = []
 
     def _plan_sylt(self, change: LyricsChange, slot: Slot) -> None:
-        """SYLT guarda (texto, tiempo); solo se quitan entradas que sean cabeceras y BOM."""
         entries = list(slot.value)
-        change.original_text = "\n".join(text for text, _time in entries)
-        content = [text for text, _time in entries if text.strip() and not lrc.header_name(text)]
-        if len(content) <= NEARLY_EMPTY_MAX_LINES:
-            change.status = STATUS_NEARLY_EMPTY
-            change.message = (f"Casi vacía: solo {plural(len(content), 'línea')} con texto."
-                              if content else "Vacía (sin líneas con texto).")
+        change.original_text = change.new_text = "\n".join(text for text, _time in entries)
+        result = normalize_sylt(entries, self.strip_unknown)
+        if not self._apply_text_rules(change, result):
             return
-        new_entries = []
-        removed = []
-        removed_bom = False
-        for text, time in entries:
-            name = lrc.header_name(text)
-            if name:
-                removed.append(name)
-                continue
-            if text.startswith("﻿"):
-                text = text[1:]
-                removed_bom = True
-            new_entries.append((text, time))
-        if removed:
-            change.details.append("quita " + " ".join(f"[{name}:]" for name in dict.fromkeys(removed)))
-        if removed_bom:
-            change.details.append("quita BOM")
-        change.new_value = new_entries
-        change.new_text = "\n".join(text for text, _time in new_entries)
-        change.status = STATUS_CHANGE if new_entries != entries else STATUS_UNCHANGED
-
+        change.new_value = result.entries
+        change.new_text = result.text
+        change.status = STATUS_CHANGE if result.changed else STATUS_UNCHANGED
+        if not result.changed:
+            change.details = []
 
     # ------------------------------------------------------------------
 
@@ -700,9 +831,3 @@ class LyricsNormalizer:
             return
         for _change, item in ready:
             item["status"] = ITEM_APPLIED
-
-
-def _nearly_empty_message(result: TextResult) -> str:
-    if result.content_lines == 0:
-        return "Vacía (sin líneas con texto)."
-    return f"Casi vacía: solo {plural(result.content_lines, 'línea')} con texto."

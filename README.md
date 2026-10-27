@@ -103,30 +103,66 @@ choconostle revert ~/Música/ChoconostleLRCTool_back/2026-10-15_20-30-00
 
 | Modo | Qué hace |
 |---|---|
-| `--strip-headers` | Quita todas las cabeceras LRC (`[ar:]`, `[ti:]`, `[al:]`, `[by:]`, `[length:]`, `[offset:]`, `[re:]`, `[ve:]`...) y conserva todas las marcas de tiempo. |
-| `--standardize-headers` | Deja solo `[ar:]`, `[ti:]`, `[al:]` y `[length:]`, en ese orden y sin duplicados. Los valores salen de las etiquetas de la canción (artista, título, álbum) y de la duración del audio. **Si falta un dato, esa cabecera no se escribe**: nunca se inventan datos. Las demás cabeceras (`[by:]`, `[re:]`...) se quitan. |
+| `--strip-headers` | Quita las cabeceras LRC conocidas (lista abajo) y conserva todas las marcas de tiempo. |
+| `--standardize-headers` | Deja solo `[ar:]`, `[ti:]`, `[al:]` y `[length:]`, en ese orden y sin duplicados. Los valores salen de las etiquetas de la canción (artista, título, álbum) y de la duración del audio. **Si falta un dato, esa cabecera no se escribe**: nunca se inventan datos. Las demás cabeceras conocidas (`[by:]`, `[re:]`...) se quitan. |
 
-En ambos modos:
-- Si hay `[offset:]`, se aplica a cada marca de tiempo antes de quitarlo, así la sincronización no cambia. Un offset positivo adelanta la letra, según el formato LRC. Las marcas que quedarían en negativo se dejan en `00:00`.
-- Se conservan el formato de cada marca (`[mm:ss.xx]`, `[mm:ss.xxx]`...) y las marcas por palabra `<mm:ss.xx>`.
-- Las letras **sin marcas de tiempo** no se tocan, salvo para quitar o estandarizar las cabeceras que ya tengan.
-- Las letras **casi vacías** (2 líneas con texto o menos, p. ej. solo `[00:00.00]Instrumental`) se marcan en el reporte y **no se modifican**.
-- Los saltos de línea se convierten a LF (`\n`).
-- `SYLT` es binario (texto + tiempo): solo se quitan las entradas que sean cabeceras.
+**Solo cambia lo que se pide.** Las líneas que no son cabeceras se conservan byte por byte: codificación, BOM, saltos de línea (incluso mezclados CRLF/LF/CR), espacios y caracteres invisibles. Si no hay nada que quitar, el archivo no se reescribe. Las líneas se separan solo por CRLF, CR y LF (U+2028 y similares son parte del texto).
+
+#### Cabeceras conocidas
+
+`[ar:]` `[ti:]` `[al:]` `[au:]` `[lr:]` `[by:]` `[length:]` `[offset:]` `[re:]` `[ve:]` `[tool:]` `[la:]` `[lang:]` `[language:]` `[id:]` `[key:]` `[hash:]` `[sign:]` `[total:]` `[encoding:]` `[kana:]` `[#:]`
+
+- Se reconocen sin distinguir mayúsculas, con sangría y con espacios antes de `:`, en cualquier posición del archivo.
+- **`[ ti : valor ]`, con espacios dentro del corchete, no se reconoce como cabecera** y se conserva.
+- Pueden ir precedidas de U+200B, U+FEFF, U+200E, U+200F o U+2060: esos caracteres se quitan junto con la cabecera. En el resto de la letra no se tocan.
+- Se quitan también las líneas vacías que quedan al inicio justo después de las cabeceras retiradas.
+- `[Coro: Artista]`, `[Verso 1]` y otras etiquetas entre corchetes dentro de la letra son texto.
+
+#### Cabeceras desconocidas
+
+Las líneas con forma `[palabra:valor]` del inicio que no están en la lista (p. ej. `[xtrack:7]`) **se conservan** y se listan en la sección «Desconocidos / requieren decisión». Con `--strip-unknown-headers` se quitan (solo las del bloque inicial). Ojo: una línea como `[Coro: Artista]` al inicio de una letra también tiene esa forma.
+
+#### `[offset:]`
+
+- Si hay **un único** `[offset:]` válido (`+500`, `-300`, `250`), se aplica a las marcas de línea `[mm:ss.xx]` y por palabra `<mm:ss.xx>` antes de quitarlo. Un offset positivo adelanta la letra. Las marcas que quedarían en negativo se dejan en `00:00` (con aviso). Es el único caso en que se modifican líneas de la letra.
+- Si el offset **no se puede aplicar con seguridad**, el archivo **no se toca** (ni cabeceras ni marcas) y se lista en «Desconocidos / requieren decisión»:
+  - **dos o más** `[offset:]`: se resuelve con `--offset-policy first|last|sum` (por defecto `skip`). `sum` suma todos los valores; es la política recomendada si decides resolverlo.
+  - `[offset:]` **inválido** (p. ej. `[offset:medio segundo]`): nunca se aplica, con ninguna política. Corrígelo a mano.
+  - marcas de tiempo inválidas (`[00:61.00]`) o marcas `[mm:ss]` dentro del texto (estilo QQ) en un archivo con offset.
+
+#### Letras casi vacías y vacías
+
+- Las letras **casi vacías** (2 líneas con texto o menos, p. ej. solo `[00:00.00]Instrumental`) **se procesan con un aviso**. `--skip-near-empty` las omite.
+- Si al quitar las cabeceras **no quedaría letra** (archivo con solo cabeceras), no se escribe y se avisa.
+
+#### Letras incrustadas
+
+Mismas reglas de cabeceras y caracteres invisibles. Se conservan los saltos de línea internos. Si el texto empieza con U+FEFF, solo se quita cuando lo que sigue es una cabecera conocida. `SYLT` es binario (texto + tiempo): solo se quitan las entradas que sean cabeceras; un `SYLT` con `[offset:]` requiere decisión.
 
 ### Opciones
 
 | Opción | Descripción |
 |---|---|
 | `--apply` | Aplica los cambios. Sin ella solo se simula. |
-| `--encoding utf8` | (Predeterminado) Guarda los `.lrc`/`.txt` en UTF-8 sin BOM. |
-| `--encoding utf8-bom` | UTF-8 con BOM. |
-| `--encoding keep` | Conserva la codificación y el BOM de cada archivo. |
+| `--encoding keep` | (Predeterminado) Conserva la codificación, el BOM y los bytes de cada archivo. |
+| `--encoding utf8` / `utf8-bom` | Convierte los `.lrc`/`.txt` a UTF-8 sin o con BOM. |
+| `--encoding CÓDEC` | Cualquier códec de texto de Python (`cp1252`, `shift_jis`, `gbk`...). |
+| `--strip-unknown-headers` | Quita también las cabeceras desconocidas del inicio. |
+| `--offset-policy skip\|first\|last\|sum` | Qué hacer con dos o más `[offset:]` (por defecto `skip`). |
+| `--skip-near-empty` | Omite las letras casi vacías. |
 | `--only CARPETA_O_ÁLBUM` | Limita a una carpeta (ruta absoluta o relativa a la biblioteca) o a un álbum (nombre según las etiquetas). Se puede repetir. |
-| `--diff` | Muestra las diferencias línea por línea. |
-| `--limit N` | Máximo de canciones por lista en pantalla (0 = todas). |
+| `--diff` | Muestra las diferencias línea por línea. Los caracteres invisibles se ven como `⟨U+200B⟩`. Con `--diff` se muestra la lista completa. |
+| `--limit N` | Máximo de canciones por lista en pantalla (0 = todas). Por defecto 20, o todas con `--diff`. Si se corta, se indica cuántas faltan. |
 
-Si un archivo no es UTF-8 y su codificación no se puede confirmar (p. ej. un `.lrc` en japonés guardado en Shift-JIS), **se conserva su codificación** para no estropear el texto, y se avisa.
+Con `--encoding` distinto de `keep`, un archivo se convierte **solo si todos sus caracteres caben** en la codificación de destino; si no, se omite y se lista con los caracteres que faltan (nunca se sustituyen por `?`). Tampoco se convierte un archivo cuya codificación de origen no se pueda confirmar. `--encoding` no cambia los saltos de línea. Para eso y para indicar la codificación de origen está `convert-lyrics`.
+
+#### Codificación de origen
+
+- BOM, UTF-8 válido y UTF-16 sin BOM se reconocen con certeza.
+- Para los demás archivos (8 bits) se usa `charset-normalizer` como ayuda. La detección solo se da por buena si todos los candidatos igual de probables dan el mismo texto. Por ejemplo, un `.lrc` en Windows-1252 con `ñ` es ambiguo frente a Windows-1250 (donde ese byte es `ń`).
+- Quitar cabeceras **no depende** de la detección: las cabeceras y marcas son ASCII y se procesan byte a byte, así que un archivo Shift-JIS o Windows-1252 conserva todos sus bytes aunque la codificación sea ambigua.
+- En `--diff` y `registro.txt` se indica la codificación detectada. Si no es fiable, la vista se marca como **aproximada**.
+- Si el texto parece mojibake (`CanciÃ³n`), se avisa, pero **no se corrige**.
 
 ### Respaldo y reversión
 
@@ -159,6 +195,7 @@ src/choconostle/
 ├── matroska.py     Lector mínimo de .mka (mutagen no lo soporta)
 ├── embedded.py     Lee y escribe letras incrustadas (ID3, Vorbis, MP4, APEv2)
 ├── normalizer.py   Fase 2: LyricsNormalizer (cabeceras, offset, codificación)
+├── textio.py       Líneas sin pérdida, detección y conversión de codificación, diff
 ├── backup.py       Respaldo, manifiesto y revert
 ├── lrc.py          Análisis de letras: marcas de tiempo, cabeceras, BOM, codificación
 ├── albums.py       Agrupa pistas en álbumes
@@ -176,6 +213,8 @@ pytest
 ```
 
 Las pruebas de FLAC, MP3, WAV y APE generan los archivos en Python puro. Las de M4A, Opus, Ogg, WavPack, AIFF, Matroska y Dolby usan `ffmpeg` y se omiten si no está instalado.
+
+`tests/test_casos_generados.py` genera la biblioteca de casos de `tools/generar_casos.py` (ver `tools/CASOS.md`) en una carpeta temporal y comprueba simulación, `--apply` y `revert` sobre ella. También necesita `ffmpeg`.
 
 ## Licencia
 

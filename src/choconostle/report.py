@@ -257,9 +257,14 @@ def _limited(items: list, limit: int) -> tuple[list, int]:
     return items[:limit], len(items) - limit
 
 
-def _more(console: Console, hidden: int) -> None:
-    if hidden:
+def _more(console: Console, hidden: int, total: int | None = None, what: str = "elementos") -> None:
+    if not hidden:
+        return
+    if total is None:
         console.print(f"  ... y {hidden} más (usa --limit 0 o --json para verlos todos)", style="dim")
+    else:
+        console.print(f"  ... y {hidden} más: se muestran {total - hidden} de {total} {what}. "
+                      "Usa --limit 0 para ver la lista completa.", style="yellow")
 
 
 def _section(console: Console, title: str) -> None:
@@ -497,12 +502,13 @@ def print_normalize_plan(
     limit: int = 20,
     show_diff: bool = False,
     session=None,
+    options: list[str] | None = None,
 ) -> None:
     """Muestra el plan de normalize-lyrics (simulación) o el resultado (--apply)."""
     from choconostle.backup import ITEM_FAILED, _diff
     from choconostle.normalizer import (
-        KIND_FILE, MODE_STRIP, STATUS_CHANGE, STATUS_ERROR, STATUS_NEARLY_EMPTY,
-        STATUS_SKIPPED, STATUS_UNCHANGED,
+        KIND_FILE, MODE_STRIP, STATUS_CHANGE, STATUS_DECISION, STATUS_ERROR, STATUS_SKIPPED,
+        STATUS_UNCHANGED,
     )
 
     console = console or Console()
@@ -510,12 +516,17 @@ def print_normalize_plan(
     for change in changes:
         by_status.setdefault(change.status, []).append(change)
     to_change = by_status.get(STATUS_CHANGE, [])
+    decisions = by_status.get(STATUS_DECISION, [])
+    unknown = [change for change in changes if change.unknown_headers]
+    nearly_empty = [change for change in changes if change.nearly_empty]
 
     title = "APLICADO" if session is not None else "SIMULACIÓN (no se modificó nada)"
     console.print(f"[bold]normalize-lyrics - {title}[/bold]")
     mode_name = "quitar cabeceras" if mode == MODE_STRIP else "estandarizar cabeceras (ar, ti, al, length)"
     console.print(f"Modo: {mode_name}", markup=False)
     console.print(f"Codificación de archivos .lrc/.txt: {encoding}", markup=False)
+    for option in options or []:
+        console.print(option, markup=False)
     console.print(Text(f"Biblioteca: {root}"))
 
     _section(console, "Resumen")
@@ -531,7 +542,11 @@ def print_normalize_plan(
         f"en {plural(len(songs), 'canción', 'canciones')}",
     )
     table.add_row("Sin cambios", str(len(by_status.get(STATUS_UNCHANGED, []))))
-    table.add_row("Casi vacías (no se tocan)", str(len(by_status.get(STATUS_NEARLY_EMPTY, []))))
+    if decisions:
+        table.add_row("Requieren decisión (no se tocan)", f"[yellow]{len(decisions)}[/yellow]")
+    if unknown:
+        table.add_row("Con cabeceras desconocidas (se conservan)", str(len(unknown)))
+    table.add_row("Casi vacías (aviso)", str(len(nearly_empty)))
     if by_status.get(STATUS_SKIPPED):
         table.add_row("Omitidas", str(len(by_status[STATUS_SKIPPED])))
     if by_status.get(STATUS_ERROR):
@@ -552,16 +567,24 @@ def print_normalize_plan(
             table.add_column()
             for change in groups[name]:
                 table.add_row(Text(change.label), Text("; ".join(change.details)))
+                for warning in change.warnings:
+                    table.add_row(Text(""), Text(f"aviso: {warning}", style="yellow"))
             console.print(table)
             if show_diff:
                 for change in groups[name]:
-                    console.print(Text(f"   {change.label}:", style="bold dim"))
-                    for line in _diff(change.original_text, change.new_text)[2:]:
+                    heading = f"   {change.label}:"
+                    if change.source_encoding:
+                        heading += f" ({change.source_encoding})"
+                    console.print(Text(heading, style="bold dim"))
+                    if change.approximate:
+                        console.print(Text("     vista aproximada: la codificación no se pudo confirmar",
+                                           style="yellow"))
+                    for line in _diff(change.original_text, change.new_text):
                         style = "green" if line.startswith("+") else "red" if line.startswith("-") else "dim"
                         console.print(Text("     " + line, style=style))
-        _more(console, hidden)
+        _more(console, hidden, len(names), "canciones")
 
-    def listing(title: str, items: list, style: str | None = None) -> None:
+    def listing(title: str, items: list, style: str | None = None, text=lambda change: change.message) -> None:
         if not items:
             return
         _section(console, f"{title} ({len(items)})")
@@ -569,10 +592,17 @@ def print_normalize_plan(
         for change in shown:
             label = "" if change.kind == KIND_FILE else f" [{change.label}]"
             where = _rel(change.path, root) + label
-            console.print(Text(f"  {where}: {change.message}", style=style or ""))
-        _more(console, hidden)
+            console.print(Text(f"  {where}: {text(change)}", style=style or ""))
+        _more(console, hidden, len(items))
 
-    listing("Letras casi vacías: se marcan y no se modifican", by_status.get(STATUS_NEARLY_EMPTY, []))
+    listing("Desconocidos / requieren decisión: offsets (no se tocaron)", decisions, "yellow")
+    listing("Desconocidos / requieren decisión: cabeceras desconocidas que se conservan "
+            "(--strip-unknown-headers para quitarlas)", unknown,
+            text=lambda change: " ".join(f"[{name}:]" for name in change.unknown_headers))
+    others = [change for change in changes
+              if change.status != STATUS_CHANGE and change.warnings
+              and change.status not in (STATUS_SKIPPED, STATUS_ERROR, STATUS_DECISION)]
+    listing("Avisos en letras sin cambios", others, "dim", text=lambda change: " ".join(change.warnings))
     listing("Omitidas", by_status.get(STATUS_SKIPPED, []), "dim")
     listing("Errores", by_status.get(STATUS_ERROR, []), "red")
 
