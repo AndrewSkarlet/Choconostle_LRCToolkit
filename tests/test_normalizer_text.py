@@ -261,3 +261,35 @@ def test_sylt_removes_header_entries_only():
 def test_sylt_with_offset_requires_decision():
     result = normalize_sylt([("[offset:100]", 0), ("Uno", 1000), ("Dos", 2000), ("Tres", 3000)])
     assert result.decision
+
+
+def test_strip_unknown_never_touches_lines_inside_lyrics():
+    from choconostle.textio import diff_lines
+    synced = ("[xtrack:7]\n[ti:T]\n\n[00:01.00]Uno\n[Coro: Artista]\n[00:02.00]Dos\n"
+              "[clave:valor]\n[00:03.00]Tres\n")
+    result = strip(synced, strip_unknown=True)
+    assert result.text == "[00:01.00]Uno\n[Coro: Artista]\n[00:02.00]Dos\n[clave:valor]\n[00:03.00]Tres\n"
+    assert result.removed_unknown == ["xtrack"]
+    # Todo lo que se quita aparece en el diff; lo que se conserva, no.
+    diff = diff_lines(synced, result.text)
+    assert [line for line in diff if line.startswith("-")] == ["-[xtrack:7]", "-[ti:T]", "-"]
+    assert not [line for line in diff if line.startswith("+")]
+
+    unsynced = "[xtrack:7]\nPrimera línea\n[Coro: Artista]\nSegunda\nTercera\n"
+    result = strip(unsynced, strip_unknown=True)
+    assert result.text == "Primera línea\n[Coro: Artista]\nSegunda\nTercera\n"
+
+
+def test_initial_block_spans_blank_lines_until_first_lyric_line():
+    text = "[ti:T]\n\n[xtrack:7]\n\n[00:01.00]Uno\n[00:02.00]Dos\n[00:03.00]Tres\n"
+    assert strip(text, strip_unknown=True).text == "[00:01.00]Uno\n[00:02.00]Dos\n[00:03.00]Tres\n"
+    kept = strip(text)
+    assert kept.text == "[xtrack:7]\n\n[00:01.00]Uno\n[00:02.00]Dos\n[00:03.00]Tres\n"
+    assert kept.unknown_headers == ["xtrack"]
+
+
+def test_sylt_strip_unknown_only_initial_entries():
+    entries = [("[xtrack:7]", 0), ("Uno", 1000), ("[Coro: Artista]", 1500), ("Dos", 2000), ("Tres", 3000)]
+    result = normalize_sylt(entries, strip_unknown=True)
+    assert result.entries == entries[1:]
+    assert result.removed_unknown == ["xtrack"]

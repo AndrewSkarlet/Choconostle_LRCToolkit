@@ -6,6 +6,7 @@ La biblioteca se genera una vez en una carpeta temporal (necesita
 ffmpeg); cada prueba que modifica archivos trabaja sobre una copia.
 """
 
+import codecs
 import importlib.util
 import shutil
 import subprocess
@@ -24,7 +25,7 @@ from choconostle.normalizer import (
     STATUS_UNCHANGED, LyricsNormalizer,
 )
 from choconostle.scanner import scan_directory
-from choconostle.textio import decode_lyrics, split_lines
+from choconostle.textio import decode_lyrics, encoding_family, split_lines
 
 GENERATOR = Path(__file__).resolve().parents[1] / "tools" / "generar_casos.py"
 # Formatos que la etapa ① todavía guarda con mutagen (no idénticos en bytes).
@@ -162,15 +163,29 @@ def test_invisible_characters(plan_casos):
     assert "Uno​" in text and "Cuatro﻿" in text
 
 
-@pytest.mark.parametrize("name,label", [
-    ("08 shift-jis japones", "Shift-JIS"), ("09 gbk chino", "GB18030"),
-    ("10 euc-kr coreano", "EUC-KR"), ("11 windows-1251 ruso", "Windows-1251"),
+@pytest.mark.parametrize("name,codec,family", [
+    ("08 shift-jis japones", "shift_jis", "Shift-JIS"), ("09 gbk chino", "gbk", "GB"),
+    ("10 euc-kr coreano", "euc_kr", "EUC-KR"), ("11 windows-1251 ruso", "cp1251", None),
 ])
-def test_8bit_encodings_keep_bytes(plan_casos, name, label):
+def test_8bit_encodings_keep_bytes(plan_casos, name, codec, family):
+    """
+    La codificación detectada puede ser otro miembro de la familia
+    compatible (cp949 por EUC-KR, cp932 por Shift-JIS, gb18030 por GBK),
+    según la versión de charset-normalizer. Lo que importa: la familia es
+    la correcta, decodificar y recodificar da los mismos bytes, el texto es
+    el que se escribió y la vista no es aproximada.
+    """
     change = plan_casos[f"01_codificaciones/{name}.lrc"]
     assert change.status == STATUS_CHANGE
-    assert label in change.source_encoding
-    assert not change.approximate
+    detected = decode_lyrics(change.original_bytes).detection.encoding
+    if family is None:
+        assert codecs.lookup(detected).name == codecs.lookup(codec).name
+    else:
+        assert encoding_family(detected) == family, detected
+    data = change.original_bytes
+    assert data.decode(detected).encode(detected) == data
+    assert data.decode(detected) == data.decode(codec)
+    assert not change.approximate, change.source_encoding
     assert change.new_bytes in change.original_bytes  # se quitaron solo líneas del inicio
 
 
@@ -347,3 +362,15 @@ def test_invalid_encoding_option(biblioteca):
     result = CliRunner().invoke(app, ["normalize-lyrics", str(biblioteca), "--strip-headers",
                                       "--encoding", "no-existe"])
     assert result.exit_code == 2
+
+
+def test_cli_strip_unknown_shows_removed_lines_in_diff(biblioteca):
+    result = CliRunner().invoke(app, [
+        "normalize-lyrics", str(biblioteca), "--strip-headers", "--strip-unknown-headers", "--diff",
+        "--no-progress", "--only", "03_cabeceras"], env={"COLUMNS": "200"})
+    assert result.exit_code == 0, result.output
+    assert "quita desconocidas [xtrack:]" in result.output
+    assert "-[xtrack:7]" in result.output
+    # [Coro: Artista Invitado] va después de la primera línea de letra: no se toca.
+    assert "-[00:04.50][Coro: Artista Invitado]" not in result.output
+    assert "Cabeceras desconocidas del inicio: se quitan" in result.output

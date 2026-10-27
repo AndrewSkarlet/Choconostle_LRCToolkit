@@ -14,6 +14,11 @@
 - Sección «Desconocidos / requieren decisión» en el reporte: offsets que no se aplicaron y cabeceras desconocidas que se conservan.
 - `--diff` y `registro.txt` muestran los caracteres invisibles como `⟨U+200B⟩`, indican la codificación de origen y marcan la vista como aproximada si no se pudo confirmar.
 - Pruebas con la biblioteca de `tools/generar_casos.py`, generada en una carpeta temporal.
+- Familias de codificaciones compatibles (cp932/Shift-JIS, cp949/EUC-KR, GB18030/GBK, cp950/Big5, EUC-JP, cp1252/Latin-1).
+- Prueba de la detección con charset-normalizer en Python puro (sin la extensión compilada), como en Termux.
+
+#### Corregido
+- Con charset-normalizer 3.5.2, un `.lrc` en EUC-KR se marcaba como vista aproximada. La decodificación como EUC-JIS-2004 quedaba a 0.1 de caos, justo en el margen de empate (inclusivo, 0.1). Ahora el empate es una diferencia menor que 0.05 y los candidatos de una misma familia compatible no se consideran rivales.
 
 #### Cambiado
 - `[lr:]` se añade a la lista de cabeceras conocidas (`[hash:]` ya estaba).

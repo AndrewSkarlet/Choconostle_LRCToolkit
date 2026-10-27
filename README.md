@@ -120,7 +120,9 @@ choconostle revert ~/Música/ChoconostleLRCTool_back/2026-10-15_20-30-00
 
 #### Cabeceras desconocidas
 
-Las líneas con forma `[palabra:valor]` del inicio que no están en la lista (p. ej. `[xtrack:7]`) **se conservan** y se listan en la sección «Desconocidos / requieren decisión». Con `--strip-unknown-headers` se quitan (solo las del bloque inicial). Ojo: una línea como `[Coro: Artista]` al inicio de una letra también tiene esa forma.
+Las líneas con forma `[palabra:valor]` del **bloque inicial** que no están en la lista (p. ej. `[xtrack:7]`) **se conservan** y se listan en la sección «Desconocidos / requieren decisión». El bloque inicial son las líneas anteriores a la primera línea de letra (con o sin marca de tiempo); puede incluir líneas vacías.
+
+Con `--strip-unknown-headers` se quitan, pero **solo las del bloque inicial**. Una línea `[Coro: Artista]` a mitad de la letra nunca se toca. Todo lo que se quita aparece en `--diff` y en `registro.txt`. Ojo: si una letra *empieza* con `[Coro: Artista]`, esa línea sí forma parte del bloque inicial.
 
 #### `[offset:]`
 
@@ -159,7 +161,11 @@ Con `--encoding` distinto de `keep`, un archivo se convierte **solo si todos sus
 #### Codificación de origen
 
 - BOM, UTF-8 válido y UTF-16 sin BOM se reconocen con certeza.
-- Para los demás archivos (8 bits) se usa `charset-normalizer` como ayuda. La detección solo se da por buena si todos los candidatos igual de probables dan el mismo texto. Por ejemplo, un `.lrc` en Windows-1252 con `ñ` es ambiguo frente a Windows-1250 (donde ese byte es `ń`).
+- Para los demás archivos (8 bits) se usa `charset-normalizer` como ayuda; la decisión la toma el programa:
+  - Dos candidatos están **empatados** si su «caos» (la medida de charset-normalizer) difiere en menos de 0.05.
+  - La detección es **fiable** si, entre los candidatos empatados que decodifican y recodifican los bytes sin cambios, todos dan el mismo texto o todos son de la misma **familia compatible**. Las familias son: Shift-JIS/cp932, EUC-KR/cp949, GBK/GB18030/GB2312, Big5/cp950, EUC-JP y Windows-1252/Latin-1. En una familia se usa la más amplia. Por eso un EUC-KR puede aparecer como «EUC-KR (cp949)».
+  - Si no es fiable, es **ambigua**. Ejemplo: un `.lrc` en Windows-1252 con `ñ` empata con Windows-1250, donde ese byte es `ń`.
+- La vista es **aproximada** solo cuando la codificación de origen no se puede confirmar: detección ambigua, archivo casi todo UTF-8 con bytes inválidos, o sin candidatos. Aun así, el archivo se modifica byte a byte.
 - Quitar cabeceras **no depende** de la detección: las cabeceras y marcas son ASCII y se procesan byte a byte, así que un archivo Shift-JIS o Windows-1252 conserva todos sus bytes aunque la codificación sea ambigua.
 - En `--diff` y `registro.txt` se indica la codificación detectada. Si no es fiable, la vista se marca como **aproximada**.
 - Si el texto parece mojibake (`CanciÃ³n`), se avisa, pero **no se corrige**.

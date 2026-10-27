@@ -53,11 +53,48 @@ ENCODING_NAMES = {
     "gbk": "GBK", "gb18030": "GB18030", "euc_kr": "EUC-KR", "cp949": "EUC-KR (cp949)",
 }
 
-# Detección: candidatos con un "caos" hasta este margen sobre el mejor se
-# consideran igual de probables. Si decodifican a textos distintos, la
-# detección es ambigua.
-_CHAOS_MARGIN = 0.1
+# Detección. charset-normalizer da a cada candidato un "caos" (0 = texto
+# limpio; sube con símbolos raros, mezcla de alfabetos...). Dos candidatos
+# están empatados si su caos difiere en menos de _TIE_MARGIN. Las
+# decodificaciones equivocadas de textos CJK quedan entre 0.10 y 0.16 por
+# encima de la correcta según la versión (p. ej. EUC-KR leído como
+# EUC-JIS-2004: 0.15 en 3.5.1, 0.10 en 3.5.2), así que no son empates;
+# Windows-1250 frente a Windows-1252 en español empatan en 0.0.
+_TIE_MARGIN = 0.05
 _MAX_CHAOS = 0.2
+
+# Familias de codificaciones compatibles: la primera es la más amplia (las
+# demás son subconjuntos o variantes que solo difieren en pocos
+# caracteres). Si los candidatos empatados son todos de una familia, la
+# detección es fiable y se usa la más amplia presente.
+ENCODING_FAMILIES = {
+    "Shift-JIS": ["cp932", "shift_jis", "shift_jis_2004", "shift_jisx0213"],
+    "EUC-KR": ["cp949", "euc_kr"],
+    "GB": ["gb18030", "gbk", "gb2312"],
+    "Big5": ["cp950", "big5", "big5hkscs"],
+    "EUC-JP": ["euc_jis_2004", "euc_jisx0213", "euc_jp"],
+    "Europa occidental": ["cp1252", "latin_1"],
+}
+
+
+def _codec_name(name: str) -> str:
+    try:
+        return codecs.lookup(name).name
+    except LookupError:
+        return name
+
+
+_FAMILY_OF = {_codec_name(member): (family, rank)
+              for family, members in ENCODING_FAMILIES.items()
+              for rank, member in enumerate(members)}
+
+
+def encoding_family(name: str | None) -> str | None:
+    """"euc_kr" y "cp949" -> "EUC-KR"; None si no pertenece a ninguna familia."""
+    if not name:
+        return None
+    entry = _FAMILY_OF.get(_codec_name(name))
+    return entry[0] if entry else None
 
 
 def encoding_label(name: str | None) -> str:
@@ -168,9 +205,9 @@ def detect_encoding(data: bytes) -> Detection:
     """
     Detecta la codificación de bytes que no son UTF-8 válido ni tienen BOM.
 
-    Es fiable solo si todos los candidatos igual de probables decodifican
-    al mismo texto y volver a codificar da los mismos bytes. Un archivo
-    casi todo UTF-8 con algunos bytes inválidos nunca es fiable.
+    charset-normalizer solo propone candidatos; la decisión la toma
+    judge_candidates(). Un archivo casi todo UTF-8 con algunos bytes
+    inválidos nunca es fiable.
     """
     invalid = _mostly_utf8(data)
     if invalid:
@@ -179,23 +216,43 @@ def detect_encoding(data: bytes) -> Detection:
         from charset_normalizer import from_bytes
     except ImportError:  # pragma: no cover - dependencia declarada
         return Detection(None, False)
+    return judge_candidates(data, [(match.encoding, match.chaos) for match in from_bytes(data)])
 
-    results = from_bytes(data)
-    best = results.best()
-    if best is None:
-        return Detection(None, False)
-    texts: dict[str, list[str]] = {}
-    for match in results:
-        if match.chaos <= best.chaos + _CHAOS_MARGIN:
-            texts.setdefault(str(match), []).append(match.encoding)
-    candidates = [names[0] for names in texts.values()]
-    confident = len(texts) == 1 and best.chaos <= _MAX_CHAOS
-    if confident:
+
+def judge_candidates(data: bytes, candidates: list[tuple[str, float]]) -> Detection:
+    """
+    Decide si la detección es fiable a partir de los candidatos
+    [(códec, caos)], en el orden de preferencia de charset-normalizer.
+
+    Es fiable si, entre los candidatos empatados con el mejor (y que
+    decodifican y recodifican los bytes sin cambios), todos dan el mismo
+    texto o todos son de la misma familia compatible. Si no, es ambigua y
+    la vista del texto será aproximada.
+    """
+    usable = []
+    for encoding, chaos in candidates:
         try:
-            confident = data.decode(best.encoding).encode(best.encoding) == data
+            text = data.decode(encoding)
         except (UnicodeError, LookupError):
-            confident = False
-    return Detection(best.encoding, confident, candidates if len(candidates) > 1 else [])
+            continue
+        if text.encode(encoding) == data:
+            usable.append((encoding, chaos, text))
+    if not usable:
+        return Detection(None, False)
+
+    best_chaos = min(chaos for _encoding, chaos, _text in usable)
+    tied = [entry for entry in usable if entry[1] - best_chaos < _TIE_MARGIN]
+    by_text: dict[str, list[str]] = {}
+    for encoding, _chaos, text in tied:
+        by_text.setdefault(text, []).append(encoding)
+    chosen = tied[0][0]
+    if len(by_text) > 1:
+        families = {encoding_family(encoding) for encoding, _chaos, _text in tied}
+        if len(families) != 1 or None in families:
+            return Detection(chosen, False, [names[0] for names in by_text.values()])
+        chosen = min((encoding for encoding, _chaos, _text in tied),
+                     key=lambda name: _FAMILY_OF[_codec_name(name)][1])
+    return Detection(chosen, best_chaos <= _MAX_CHAOS)
 
 
 # --------------------------------------------------------------------------
