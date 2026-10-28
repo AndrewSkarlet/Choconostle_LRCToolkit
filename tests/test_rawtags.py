@@ -5,6 +5,7 @@ Los archivos se crean con las funciones de tools/generar_casos.py (ver
 tools/CASOS.md) en carpetas temporales.
 """
 
+import errno
 import importlib.util
 import json
 import shutil
@@ -187,7 +188,7 @@ def test_txxx_with_several_values_is_not_joined(gen, lyrics, tmp_path):
     original = mp3.read_bytes()
     _normalizer, changes = run(root)
     labels = [(c.label, c.slot.index) for c in changes if c.kind == "embedded"]
-    assert labels == [("TXXX:LYRICS", 0), ("TXXX:LYRICS", 1)]
+    assert labels == [("TXXX:LYRICS #1", 0), ("TXXX:LYRICS #2", 1)]
     session, _changes = apply(root)
     layout, _audio = frames_of(mp3)
     values = [text for text, _bom in layout.frames[1].lyric.values]
@@ -406,7 +407,7 @@ def test_io_error_mid_write_restores_immediately(gen, lyrics, tmp_path, monkeypa
         calls["n"] += 1
         if calls["n"] == 1:  # la escritura falla a la mitad; la restauración funciona
             handle.write(data[:len(data) // 2])
-            raise OSError(5, "Input/output error")
+            raise OSError(errno.EINVAL, "Invalid argument")  # error no fatal (EIO detiene todo)
         handle.write(data)
     monkeypatch.setattr(writer, "_write", flaky)
     session = normalizer.apply(changes, root)
@@ -436,8 +437,8 @@ def test_manifest_records_patches_not_audio(gen, lyrics, tmp_path):
     root = tmp_path / "lib"
     _make(gen, lyrics, root, "mp3")
     session, _ = apply(root)
-    manifest = json.loads((session.folder / backup.MANIFEST_NAME).read_text(encoding="utf-8"))
-    assert manifest["manifest_version"] == 2
+    manifest = session.manifest
+    assert manifest["manifest_version"] == 3
     edit = manifest["edits"][0]
     assert edit["writer"] == "raw" and edit["mode"] == "inplace" and edit["status"] == "applied"
     patches = json.loads((session.folder / edit["patches"]).read_text(encoding="utf-8"))

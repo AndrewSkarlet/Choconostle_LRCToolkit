@@ -157,18 +157,22 @@ def test_apply_strip(library):
 
 
 def test_backup_contents(library):
+    from choconostle import run as runs
     normalizer, changes = run(library)
     session = normalizer.apply(changes, library)
     folder = session.folder
     assert folder.parent == library / BACKUP_DIR_NAME
-    manifest = json.loads((folder / backup.MANIFEST_NAME).read_text(encoding="utf-8"))
-    items = manifest["items"]
+    state = json.loads((folder / runs.STATE_NAME).read_text(encoding="utf-8"))
+    assert state["format"] == 3 and state["state"] == runs.STATE_COMPLETED
+    items = session.manifest["items"]
     assert len(items) == len([c for c in changes if c.status == STATUS_CHANGE])
-    for item in items:
-        assert (folder / item["original_copy"]).is_file()
-    lrc_item = next(item for item in items if item["path"].endswith("01 Uno.lrc"))
-    assert (folder / lrc_item["original_copy"]).read_bytes().startswith(codecs.BOM_UTF8)
-    log = (folder / backup.LOG_NAME).read_text(encoding="utf-8")
+    assert {item["status"] for item in items} == {backup.ITEM_APPLIED}
+    intents, done = session.outcome()
+    assert set(intents) == set(done)
+    lrc_record = next(r for r in session.plan_records() if r["path"].endswith("01 Uno.lrc"))
+    copy = folder / intents[lrc_record["id"]]["copy"]
+    assert copy.read_bytes().startswith(codecs.BOM_UTF8)
+    log = (folder / runs.LOG_NAME).read_text(encoding="utf-8")
     assert "choconostle revert" in log and "-[ti:Uno]" in log
     # No se copian archivos de audio.
     assert not [p for p in folder.rglob("*") if p.suffix in (".flac", ".mp3", ".wav")]

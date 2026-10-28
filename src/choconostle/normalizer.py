@@ -31,15 +31,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from choconostle import lrc
-from choconostle.backup import ITEM_APPLIED, ITEM_FAILED, BackupSession
 from choconostle.config import NEARLY_EMPTY_MAX_LINES, STANDARD_HEADERS
 from choconostle.embedded import Slot, open_editor
 from choconostle.rawtags import MODE_FULL, REASONS, Unsupported, apply_patches, sha256
 from choconostle.rawtags.ogg import OggEditor
-from choconostle.rawtags.writer import (
-    ChangedError, Journal, RestoreError, WriteError, file_signature, required_space, rewrite_with,
-    write_edit,
-)
+from choconostle.rawtags.writer import Journal, file_signature, required_space
 from choconostle.models.lyrics import SOURCE_EXTERNAL
 from choconostle.models.track import Track
 from choconostle.scanner import LibraryScan
@@ -47,7 +43,7 @@ from choconostle.textio import (
     LyricsDecodeError, TargetEncoding, UnencodableError, decode_lyrics, encode_text,
     encoding_label, find_mojibake, parse_target_encoding, split_lines, strip_invisible_prefix,
 )
-from choconostle.utils import format_size, plural, write_file_atomic
+from choconostle.utils import format_size, plural
 
 MODE_STRIP = "strip"
 MODE_STANDARDIZE = "standardize"
@@ -492,6 +488,8 @@ class LyricsChange:
     slot: Slot | None = None
     original_value: object = None
     new_value: object = None
+    headers: list = field(default_factory=list)
+    """Cabeceras usadas por --standardize-headers (para repetir el cálculo al aplicar)."""
     file_plan: dict | None = None
     """Datos del archivo al planificar: firma, hash de la región, modo de escritura."""
     skip_reason: str | None = None
@@ -554,16 +552,19 @@ class LyricsNormalizer:
     def plan(self, scan: LibraryScan, tracks: list[Track] | None = None,
              orphan_lyrics: list | None = None) -> list[LyricsChange]:
         """
-        Calcula los cambios sin modificar nada.
+        Calcula los cambios sin modificar nada (todo en memoria).
 
         `tracks` y `orphan_lyrics` permiten limitar el plan (opción --only);
-        por defecto se usa todo el escaneo.
+        por defecto se usa todo el escaneo. Para bibliotecas grandes, la
+        ejecución recorre carpeta por carpeta con plan_tracks() (run.py).
         """
         tracks = scan.tracks if tracks is None else tracks
         orphan_lyrics = scan.orphan_lyrics if orphan_lyrics is None else orphan_lyrics
-        changes: list[LyricsChange] = []
-        seen_files: set[Path] = set()
+        return list(self.plan_tracks(tracks, orphan_lyrics))
 
+    def plan_tracks(self, tracks: list[Track], orphan_lyrics: list):
+        """Produce los cambios de un grupo de pistas y letras huérfanas (p. ej. una carpeta)."""
+        seen_files: set[Path] = set()
         for track in tracks:
             if track.error:
                 continue
@@ -573,9 +574,9 @@ class LyricsNormalizer:
                 if path in seen_files:
                     continue
                 seen_files.add(path)
-                changes.append(self._plan_file(path, track, headers))
+                yield self._plan_file(path, track, headers)
             if any(lyr.source != SOURCE_EXTERNAL for lyr in track.lyrics):
-                changes.extend(self._plan_embedded(track, headers))
+                yield from self._plan_embedded(track, headers)
 
         for lyrics in orphan_lyrics:
             path = Path(lyrics.location)
@@ -583,14 +584,13 @@ class LyricsNormalizer:
                 continue
             seen_files.add(path)
             if self.mode == MODE_STANDARDIZE:
-                changes.append(LyricsChange(
+                yield LyricsChange(
                     kind=KIND_FILE, path=path, track=None, label=path.name,
                     status=STATUS_SKIPPED,
                     message="Sin canción asociada: no hay etiquetas para estandarizar.",
-                ))
+                )
             else:
-                changes.append(self._plan_file(path, None, []))
-        return changes
+                yield self._plan_file(path, None, [])
 
     def _apply_text_rules(self, change: LyricsChange, result: TextResult) -> bool:
         """
@@ -618,7 +618,7 @@ class LyricsNormalizer:
         return True
 
     def _plan_file(self, path: Path, track: Track | None, headers) -> LyricsChange:
-        change = LyricsChange(kind=KIND_FILE, path=path, track=track, label=path.name)
+        change = LyricsChange(kind=KIND_FILE, path=path, track=track, label=path.name, headers=list(headers))
         try:
             data = path.read_bytes()
             change.original_mtime = path.stat().st_mtime
@@ -733,9 +733,9 @@ class LyricsNormalizer:
             return single(STATUS_ERROR, f"No se pudo leer: {exc}")
 
         changes = []
-        for slot in slots:
+        for slot, label in zip(slots, distinct_labels(slots)):
             change = LyricsChange(kind=KIND_EMBEDDED, path=path, track=track,
-                                  label=slot.label, slot=slot, original_value=slot.value)
+                                  label=label, slot=slot, original_value=slot.value)
             if slot.is_sylt:
                 self._plan_sylt(change, slot)
             else:
@@ -808,110 +808,68 @@ class LyricsNormalizer:
 
     # ------------------------------------------------------------------
 
-    def apply(self, changes: list[LyricsChange], root: Path) -> BackupSession | None:
-        """
-        Aplica los cambios planeados (status == STATUS_CHANGE).
+    def options(self) -> dict:
+        """Opciones de la ejecución (se guardan en estado.json para --resume)."""
+        return {"mode": self.mode, "encoding": self.encoding, "strip_unknown_headers": self.strip_unknown,
+                "offset_policy": self.offset_policy, "skip_near_empty": self.skip_near_empty,
+                "allow_full_rewrite": self.allow_full_rewrite}
 
-        Antes de tocar nada guarda los originales y el manifiesto en la
-        carpeta de respaldo. Retorna la sesión de respaldo, o None si no
-        había nada que cambiar.
+    @classmethod
+    def from_options(cls, options: dict) -> "LyricsNormalizer":
+        return cls(options["mode"], options["encoding"], options["strip_unknown_headers"],
+                   options["offset_policy"], options["skip_near_empty"], options["allow_full_rewrite"])
+
+    def plan_one_file(self, path: Path, headers) -> LyricsChange:
+        """Recalcula el cambio de un archivo de letra (al aplicar un plan guardado)."""
+        return self._plan_file(Path(path), None, [tuple(pair) for pair in headers])
+
+    def apply(self, changes: list[LyricsChange], root: Path, verify: str = "full"):
         """
+        Aplica los cambios planeados (status == STATUS_CHANGE) creando una
+        ejecución en disco (run.py): plan, diario y respaldo. Retorna la
+        ejecución, o None si no había nada que cambiar.
+        """
+        from choconostle import run as runs
         pending = pending_sessions(root)
         if pending:
             raise PendingWritesError(pending)
-        selected = [change for change in changes if change.status == STATUS_CHANGE]
-        if not selected:
+        if not any(change.status == STATUS_CHANGE for change in changes):
             return None
+        execution = runs.Run.create(root, "normalize-lyrics", dict(self.options(), verify=verify))
+        runs.plan_from_changes(execution, changes, root)
+        runs.apply_run(execution, self, root, verify=verify)
+        return execution
 
-        session = BackupSession(root, self.mode, self.encoding)
-        items = [session.add(change) for change in selected]
-        session.save_manifest()
 
-        embedded: dict[Path, list[tuple[LyricsChange, dict]]] = {}
-        for change, item in zip(selected, items):
-            if change.kind == KIND_FILE:
-                self._apply_file(change, item)
-            else:
-                embedded.setdefault(change.path, []).append((change, item))
-
-        journal = Journal(session.folder)
-        try:
-            for path, pairs in embedded.items():
-                self._apply_embedded(path, pairs, session, journal)
-                session.save_manifest()
-        finally:
-            session.save_manifest()
-            session.write_log()
-        return session
-
-    @staticmethod
-    def _apply_file(change: LyricsChange, item: dict) -> None:
-        try:
-            if change.path.read_bytes() != change.original_bytes:
-                raise RuntimeError("el archivo cambió desde que se planearon los cambios")
-            write_file_atomic(change.path, change.new_bytes)
-        except (OSError, RuntimeError) as exc:
-            item["status"] = ITEM_FAILED
-            item["error"] = str(exc)
-            return
-        item["status"] = ITEM_APPLIED
-
-    @staticmethod
-    def _apply_embedded(path: Path, pairs: list[tuple[LyricsChange, dict]], session: BackupSession,
-                        journal: Journal) -> None:
-        """Edita las letras de un archivo de audio en una sola escritura verificada."""
-        def fail(message):
-            for _change, item in pairs:
-                item["status"] = ITEM_FAILED
-                item["error"] = message
-
-        plan = pairs[0][0].file_plan
-        try:
-            editor = open_editor(path)
-            if editor is None:
-                raise ChangedError("el archivo ya no tiene etiquetas")
-            if file_signature(path) != tuple(plan["signature"]):
-                raise ChangedError("el archivo cambió desde que se planearon los cambios")
-            if plan["region_sha"] is not None and sha256(editor.region) != plan["region_sha"]:
-                raise ChangedError("las etiquetas cambiaron desde que se planearon los cambios")
-            current = {(slot.key, slot.index): slot.value for slot in editor.slots()}
-            for change, _item in pairs:
-                if current.get((change.slot.key, change.slot.index)) != change.original_value:
-                    raise ChangedError("la letra cambió desde que se planearon los cambios")
-            values = {(c.slot.key, c.slot.index): c.new_value for c, _item in pairs}
-            edit = editor.build(values)
-            if edit.mode != plan["mode"]:
-                raise ChangedError("la forma de escribir cambió desde que se planearon los cambios")
-        except (Unsupported, ChangedError) as exc:
-            fail(str(exc))
-            return
-        except Exception as exc:  # noqa: BLE001
-            fail(f"no se pudo abrir: {exc}")
-            return
-
-        record = session.add_edit(path, editor, edit, [item for _c, item in pairs], plan["signature"])
-        session.save_manifest()
-        try:
-            if isinstance(editor, OggEditor):
-                summary = rewrite_with(path, plan["signature"], lambda tmp: OggEditor.modify(tmp, values),
-                                       lambda original, tmp: editor.check(original, tmp, edit.expected))
-            else:
-                summary = write_edit(path, editor, edit, journal, f"edit-{record['id']:04d}",
-                                     plan["signature"], record["path"])
-        except RestoreError as exc:
-            record["status"] = ITEM_FAILED
-            record["error"] = str(exc)
-            fail(f"ERROR GRAVE: {exc}")
-            raise
-        except (WriteError, OSError) as exc:
-            record["status"] = ITEM_FAILED
-            record["error"] = str(exc)
-            fail(str(exc))
-            return
-        record.update(summary)
-        record["status"] = ITEM_APPLIED
-        for _change, item in pairs:
-            item["status"] = ITEM_APPLIED
+def distinct_labels(slots: list[Slot]) -> list[str]:
+    """
+    Etiquetas para mostrar, distintas entre sí aunque el archivo tenga
+    varias letras del mismo tipo: "USLT [eng]" y "USLT [spa]", "LYRICS #1"
+    y "LYRICS #2", "TXXX:LYRICS #1" y "#2" (valores de un mismo TXXX).
+    """
+    counts: dict[str, int] = {}
+    for slot in slots:
+        counts[slot.label] = counts.get(slot.label, 0) + 1
+    labels = []
+    for slot in slots:
+        label = slot.label
+        identity = slot.key.split("#")[0].split(":")
+        if counts[label] > 1 and slot.tag_format == "id3" and label in ("USLT", "SYLT") and len(identity) >= 3:
+            lang, desc = identity[1], ":".join(identity[2:])
+            label = f"{label} [{lang}{': ' + desc if desc else ''}]"
+        labels.append(label)
+    totals: dict[str, int] = {}
+    for label in labels:
+        totals[label] = totals.get(label, 0) + 1
+    seen: dict[str, int] = {}
+    result = []
+    for label in labels:
+        if totals[label] > 1:
+            seen[label] = seen.get(label, 0) + 1
+            result.append(f"{label} #{seen[label]}")
+        else:
+            result.append(label)
+    return result
 
 
 class PendingWritesError(Exception):

@@ -98,8 +98,14 @@ choconostle normalize-lyrics ~/Música --strip-headers --apply
 # 3. Deshacer, si hace falta
 choconostle revert ~/Música/ChoconostleLRCTool_back/2026-10-15_20-30-00
 
-# Si una escritura se interrumpió (p. ej. se desconectó la tarjeta SD)
+# Si la ejecución se detuvo (sin espacio, tarjeta SD desconectada, Ctrl+C...)
+choconostle normalize-lyrics ~/Música --resume ~/Música/ChoconostleLRCTool_back/2026-10-15_20-30-00
+
+# Si solo quieres dejar a salvo un archivo que quedó a medias, sin continuar
 choconostle recover ~/Música/ChoconostleLRCTool_back/2026-10-15_20-30-00
+
+# Borrar respaldos de más de 30 días (simulación; con --apply los borra)
+choconostle clean-backups ~/Música --older-than 30
 ```
 
 ### Modos (elige uno)
@@ -158,7 +164,10 @@ Mismas reglas de cabeceras y caracteres invisibles. Se conservan los saltos de l
 | `--allow-full-rewrite` | Permite reescribir el archivo de audio completo cuando la letra no cabe en el relleno (y siempre en Ogg/Opus). Por defecto se omiten. |
 | `--only CARPETA_O_ÁLBUM` | Limita a una carpeta (ruta absoluta o relativa a la biblioteca) o a un álbum (nombre según las etiquetas). Se puede repetir. |
 | `--diff` | Muestra las diferencias línea por línea. Los caracteres invisibles se ven como `⟨U+200B⟩`. Con `--diff` se muestra la lista completa. |
-| `--limit N` | Máximo de canciones por lista en pantalla (0 = todas). Por defecto 20, o todas con `--diff`. Si se corta, se indica cuántas faltan. |
+| `--limit N` | Máximo de canciones por lista en pantalla (0 = todas). Por defecto 20 en la simulación; todas con `--diff` o `--apply`. Si se corta, se indica cuántas faltan. `registro.txt` siempre tiene la lista completa. |
+| `--resume CARPETA` | Continúa una ejecución detenida (ver «Bibliotecas grandes»). |
+| `--verify full\|quick` | Verificación tras escribir en archivos de audio (ver «Bibliotecas grandes»). Por defecto `full`. |
+| `--no-progress` | No muestra la barra de progreso. |
 
 Con `--encoding` distinto de `keep`, un archivo se convierte **solo si todos sus caracteres caben** en la codificación de destino; si no, se omite y se lista con los caracteres que faltan (nunca se sustituyen por `?`). Tampoco se convierte un archivo cuya codificación de origen no se pueda confirmar. `--encoding` no cambia los saltos de línea. Para eso y para indicar la codificación de origen está `convert-lyrics`.
 
@@ -201,26 +210,86 @@ Esto significa leer cada archivo de audio modificado dos veces completo.
 
 **Interrupciones.** Si la escritura se corta (corte de luz, tarjeta SD desconectada), el diario conserva lo necesario para recuperar el archivo. `choconostle recover <carpeta-de-respaldo>` deja cada archivo como el original o como quedó aplicado. `revert` hace lo mismo antes de revertir, y `normalize-lyrics --apply` se niega a empezar mientras haya escrituras sin resolver.
 
+### Bibliotecas grandes (tarjeta SD)
+
+`normalize-lyrics` trabaja en **dos pasadas** y guarda todo en disco, no en memoria:
+
+1. **Planificación.** Recorre la biblioteca carpeta por carpeta. Lee las etiquetas, nunca el audio completo, y escribe cada cambio en `plan.jsonl`. En memoria solo están la carpeta actual y los totales.
+2. **Aplicación.** Lee el plan y aplica cada entrada. Antes de escribir comprueba que el original no cambió desde la planificación y que el resultado recalculado es exactamente el planeado. Un archivo modificado por otro programa en medio se marca como error y no se toca.
+
+En la terminal se ven los archivos procesados, los cambios, los errores, el tiempo transcurrido y el tiempo **restante estimado**.
+
+**Espacio libre.** Antes de aplicar se calcula el espacio necesario: copias de respaldo y parches, más el temporal más grande (una reescritura completa necesita el tamaño del archivo), más un margen de 16 MB. Si no hay suficiente, no se modifica nada. Si el disco se llena a mitad de ejecución, el archivo en curso se restaura y la ejecución se detiene.
+
+**Desconexión de la tarjeta SD.** Un error de E/S, o que desaparezcan la biblioteca o su carpeta de respaldo, detiene la ejecución en seguida. Solo cuentan como aplicados los archivos confirmados en el diario.
+
+**`--resume CARPETA`** continúa una ejecución detenida con las opciones guardadas. Antes de continuar comprueba que todo es coherente; si encuentra algo raro, se detiene, explica el motivo y no modifica nada. Comprueba que:
+- la ejecución no esté completada y su planificación haya terminado;
+- la carpeta pertenezca a esta biblioteca;
+- las escrituras byte a byte interrumpidas se puedan recuperar;
+- cada archivo ya aplicado siga como lo dejó la herramienta y su copia de respaldo exista y esté íntegra;
+- cada archivo que quedó a medias sea exactamente el original o exactamente el resultado planeado.
+
+**`--verify`** decide qué se comprueba después de escribir en un archivo de audio:
+- `full` (por defecto): el hash de todo el audio, antes y después.
+- `quick`: las etiquetas byte a byte, el tamaño y el primer y el último MB del audio.
+
+En ambos casos la región de etiquetas se relee y se verifica completa.
+
+Medición con 120 MP3 de 24 MB (2,94 GB), con la caché vaciada antes de cada pasada (`tools/medir_verificacion.py`):
+
+| | `--verify full` | `--verify quick` |
+|---|---|---|
+| Leído por el programa | 6,0 GB (2× el audio) | 0,75 GB |
+| Leído realmente del disco | 2,94 GB (1× el audio) | 0,50 GB |
+| Tiempo (disco interno) | 8,05 s (0,067 s por MP3) | 2,05 s (0,017 s por MP3) |
+
+La segunda lectura de `full` sale de la caché del sistema, no del disco. Por eso el costo real es leer en frío cada archivo modificado una vez, y esa relectura no comprueba el soporte físico (con ninguno de los dos modos). Estimación para una tarjeta SD que lee entre 20 y 90 MB/s, si se modificaran los 234 GB:
+- `full`: entre 45 minutos y 3,3 horas.
+- `quick`: unos 4 MB por archivo; con archivos de 24 MB, alrededor de una sexta parte de ese tiempo.
+
+**Rutas largas en Windows.** Las rutas de 240 caracteres o más reciben el prefijo `\\?\` (o `\\?\UNC\` en red), así funcionan aunque Windows no tenga activado `LongPathsEnabled`. Otros programas (y algunas versiones de mutagen) pueden seguir limitados a 260 caracteres.
+
 ### Respaldo y reversión
 
 Antes de modificar nada, `--apply` crea:
 
 ```
 <biblioteca>/ChoconostleLRCTool_back/<fecha-hora>/
-├── originales/       texto original de cada letra y parches de las ediciones incrustadas
-├── pendiente/        diario de escrituras en curso (vacío si todo terminó)
-├── registro.txt      qué se cambió, con las diferencias línea por línea
-└── manifiesto.json   lo necesario para revertir (versión 2)
+├── estado.json       fase (planificada, aplicando, interrumpida, completada), opciones y totales
+├── plan.jsonl        un registro por archivo de letra o de audio, con hashes y diferencias
+├── diario.jsonl      "intent" antes de escribir y "done" después, con fsync
+├── originales/       copia de cada .lrc/.txt y parches de las ediciones incrustadas
+├── pendiente/        diario de escrituras byte a byte en curso (vacío si todo terminó)
+└── registro.txt      qué se cambió, con las diferencias; se escribe a medida que avanza
 ```
 
 No se copian archivos de audio ni portadas. De cada letra incrustada se guardan los «parches»: los bytes originales de la letra y de los campos de tamaño o relleno que cambiaron. El escáner ignora esta carpeta.
 
+Cada entrada pasa por estos pasos, y una interrupción en cualquiera de ellos se resuelve con `--resume` o `revert`:
+1. copia de respaldo (fsync);
+2. `intent` (fsync);
+3. escritura;
+4. verificación;
+5. `done` (fsync).
+
 `choconostle revert <carpeta>` restaura todas las letras del respaldo:
 - **Idénticas byte a byte**: los parches se aplican al revés y el resultado se comprueba con SHA-256 contra la región original antes de escribir. Se restaura también la fecha de modificación.
 - Solo restaura una letra si sigue como la dejó `normalize-lyrics`. Si la cambiaste después, la marca como **conflicto** y no la toca. En archivos `.lrc`/`.txt`, `--force` la sobrescribe.
+- Funciona también con ejecuciones interrumpidas: solo deshace lo que llegó a aplicarse.
 - `--dry-run` muestra qué restauraría sin cambiar nada.
 - Revertir dos veces no hace nada la segunda vez.
-- Los respaldos de la v0.2.0 (manifiesto versión 1) se siguen pudiendo revertir con el método anterior.
+- Los respaldos de versiones anteriores (manifiesto versión 1 y 2) se siguen pudiendo revertir.
+
+**Varias letras del mismo tipo** en un archivo (dos `USLT`, dos `LYRICS`, valores de un `TXXX`) se muestran con etiquetas distintas («USLT [eng]», «USLT [spa]», «LYRICS #1», «LYRICS #2»). Cada una tiene su propio diff, respaldo y reversión.
+
+### Limpieza de respaldos
+
+`choconostle clean-backups RUTA --older-than DÍAS` lista los respaldos con al menos esos días de antigüedad. Solo los borra con `--apply`. **Nunca borra** un respaldo:
+- incompleto o reanudable (aplicando, interrumpido, o planificado sin aplicar);
+- con escrituras interrumpidas sin resolver;
+- con entradas sin confirmar en el diario;
+- con una fecha que no se puede leer.
 
 ## Estructura
 
@@ -237,7 +306,8 @@ src/choconostle/
 ├── legacy_embedded.py  Edición con mutagen de la v0.2.0 (solo para revertir respaldos antiguos)
 ├── normalizer.py   Fase 2: LyricsNormalizer (cabeceras, offset, codificación)
 ├── textio.py       Líneas sin pérdida, detección y conversión de codificación, diff
-├── backup.py       Respaldo, manifiesto y revert
+├── run.py          Ejecución en dos pasadas: plan en disco, diario, --resume, clean-backups
+├── backup.py       Revert (todas las versiones de respaldo) y recover
 ├── lrc.py          Análisis de letras: marcas de tiempo, cabeceras, BOM, codificación
 ├── albums.py       Agrupa pistas en álbumes
 ├── report.py       Reporte en terminal y JSON
@@ -255,7 +325,9 @@ pytest
 
 Las pruebas de FLAC, MP3, WAV y APE generan los archivos en Python puro. Las de M4A, Opus, Ogg, WavPack, AIFF, Matroska y Dolby usan `ffmpeg` y se omiten si no está instalado.
 
-`tests/test_casos_generados.py` genera la biblioteca de casos de `tools/generar_casos.py` (ver `tools/CASOS.md`) en una carpeta temporal y comprueba simulación, `--apply` y `revert` sobre ella. También necesita `ffmpeg`.
+`tests/conftest.py` genera una vez por sesión la biblioteca de casos de `tools/generar_casos.py` (ver `tools/CASOS.md`) en una carpeta temporal; `test_casos_generados.py`, `test_rawtags.py` y `test_run.py` trabajan sobre copias. También necesitan `ffmpeg`.
+
+`tools/medir_verificacion.py` crea una biblioteca sintética grande (Linux, ffmpeg) y mide el costo de `--verify full` frente a `--verify quick`.
 
 ## Licencia
 

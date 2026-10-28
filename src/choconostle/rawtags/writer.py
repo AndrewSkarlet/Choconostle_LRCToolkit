@@ -35,8 +35,14 @@ import shutil
 from pathlib import Path
 
 from choconostle.rawtags import MODE_FULL, apply_patches, sha256
+from choconostle.utils import long_path
 
 JOURNAL_DIR = "pendiente"
+VERIFY_FULL = "full"
+"""Se calcula el hash de todo el archivo fuera de la región, antes y después."""
+VERIFY_QUICK = "quick"
+"""Del resto del archivo solo se comparan el tamaño, el primer y el último MB."""
+_SAMPLE = 1 << 20
 TEMP_SUFFIX = ".choconostle-tmp"
 _CHUNK = 1 << 20
 _SPACE_MARGIN = 1 << 20
@@ -73,15 +79,22 @@ def _fsync_dir(folder: Path) -> None:
 
 
 def read_at(path: Path, start: int, length: int) -> bytes:
-    with open(path, "rb") as handle:
+    with open(long_path(path), "rb") as handle:
         handle.seek(start)
         return handle.read(length)
 
 
-def outside_hash(path: Path, start: int, length: int) -> str:
-    """SHA-256 de todo el archivo salvo los bytes [start, start + length)."""
+def outside_hash(path: Path, start: int, length: int, verify: str = VERIFY_FULL) -> str:
+    """
+    SHA-256 de todo el archivo salvo los bytes [start, start + length).
+
+    Con VERIFY_QUICK solo se usan el tamaño de esa parte, su primer MB y
+    su último MB.
+    """
+    if verify == VERIFY_QUICK:
+        return _outside_sample(path, start, length)
     digest = hashlib.sha256()
-    with open(path, "rb") as handle:
+    with open(long_path(path), "rb") as handle:
         remaining = start
         while remaining > 0:
             chunk = handle.read(min(_CHUNK, remaining))
@@ -95,8 +108,31 @@ def outside_hash(path: Path, start: int, length: int) -> str:
     return digest.hexdigest()
 
 
+def _outside_sample(path: Path, start: int, length: int) -> str:
+    size = os.stat(long_path(path)).st_size
+    segments = [(0, start), (start + length, size - start - length)]
+    total = sum(n for _o, n in segments)
+
+    def read_range(first: int, count: int) -> bytes:
+        """Bytes [first, first + count) de la parte de fuera de la región."""
+        out = []
+        position = 0
+        with open(long_path(path), "rb") as handle:
+            for offset, n in segments:
+                low, high = max(first, position), min(first + count, position + n)
+                if low < high:
+                    handle.seek(offset + low - position)
+                    out.append(handle.read(high - low))
+                position += n
+        return b"".join(out)
+    digest = hashlib.sha256(str(total).encode())
+    digest.update(read_range(0, min(_SAMPLE, total)))
+    digest.update(read_range(max(0, total - _SAMPLE), min(_SAMPLE, total)))
+    return digest.hexdigest()
+
+
 def file_signature(path: Path) -> tuple[int, int]:
-    info = os.stat(path)
+    info = os.stat(long_path(path))
     return info.st_size, info.st_mtime_ns
 
 
@@ -156,7 +192,8 @@ class Journal:
 # --------------------------------------------------------------------------
 
 def write_edit(path: Path, editor, edit, journal: Journal, name: str,
-               signature: tuple[int, int], root_path: str | None = None) -> dict:
+               signature: tuple[int, int], root_path: str | None = None,
+               verify: str = VERIFY_FULL) -> dict:
     """
     Aplica `edit` (calculada sobre `editor.region`) al archivo.
 
@@ -174,15 +211,16 @@ def write_edit(path: Path, editor, edit, journal: Journal, name: str,
     if problems:
         raise WriteError("la edición calculada no es segura: " + "; ".join(problems))
 
-    before = outside_hash(path, editor.start, len(old))
+    before = outside_hash(path, editor.start, len(old), verify)
     size_before = signature[0]
     size_after = size_before + len(new) - len(old)
     summary = {"old_sha": sha256(old), "new_sha": sha256(new), "size_before": size_before,
+               "mtime_ns": signature[1],
                "size_after": size_after, "outside": before, "start": editor.start,
-               "old_len": len(old), "new_len": len(new)}
+               "old_len": len(old), "new_len": len(new), "verify": verify}
     if edit.mode == MODE_FULL:
         _rewrite_file(path, editor.start, len(old), new, before,
-                      lambda candidate: _check(candidate, editor.start, new, before, editor, edit))
+                      lambda candidate: _check(candidate, editor.start, new, before, editor, edit, verify))
         return summary
 
     if not editor.at_eof and len(new) != len(old):
@@ -191,14 +229,14 @@ def write_edit(path: Path, editor, edit, journal: Journal, name: str,
     record = dict(summary, path=root_path or str(path), first=first)
     journal.begin(name, record, old[first:])
     try:
-        with open(path, "r+b") as handle:
+        with open(long_path(path), "r+b") as handle:
             handle.seek(editor.start + first)
             _write(handle, new[first:])
             if len(new) < len(old):
                 handle.truncate(editor.start + len(new))
             handle.flush()
             os.fsync(handle.fileno())
-        problems = _check(path, editor.start, new, before, editor, edit)
+        problems = _check(path, editor.start, new, before, editor, edit, verify)
     except Exception as exc:  # noqa: BLE001 - se restaura ante cualquier fallo de escritura
         _restore(path, record, old[first:], journal, name)
         raise WriteError(f"no se pudo escribir ({exc}); se restauró el original") from exc
@@ -210,7 +248,7 @@ def write_edit(path: Path, editor, edit, journal: Journal, name: str,
     return summary
 
 
-def _check(path: Path, start: int, new: bytes, before: str, editor, edit) -> list[str]:
+def _check(path: Path, start: int, new: bytes, before: str, editor, edit, verify: str = VERIFY_FULL) -> list[str]:
     """Relee el archivo y compara región, estructura y hash de fuera de la región."""
     problems = []
     written = read_at(path, start, len(new))
@@ -218,7 +256,7 @@ def _check(path: Path, start: int, new: bytes, before: str, editor, edit) -> lis
         problems.append("la región escrita no coincide")
     else:
         problems += editor.verify(written, edit.expected)
-    if outside_hash(path, start, len(new)) != before:
+    if outside_hash(path, start, len(new), verify) != before:
         problems.append("cambió el audio o el resto del archivo")
     return problems
 
@@ -226,16 +264,21 @@ def _check(path: Path, start: int, new: bytes, before: str, editor, edit) -> lis
 def _restore(path: Path, record: dict, preimage: bytes, journal: Journal, name: str) -> None:
     """Vuelve a escribir los bytes originales y lo comprueba. Si no puede, conserva el diario."""
     try:
-        with open(path, "r+b") as handle:
+        with open(long_path(path), "r+b") as handle:
             handle.seek(record["start"] + record["first"])
             _write(handle, preimage)
             handle.truncate(record["size_before"])
             handle.flush()
             os.fsync(handle.fileno())
+        if record.get("mtime_ns"):
+            # Bytes y fecha como antes: así la comprobación "no cambió desde la
+            # planificación" sigue valiendo al reanudar.
+            os.utime(long_path(path), ns=(record["mtime_ns"], record["mtime_ns"]))
         region = read_at(path, record["start"], record["old_len"])
         ok = (sha256(region) == record["old_sha"]
-              and os.stat(path).st_size == record["size_before"]
-              and outside_hash(path, record["start"], record["old_len"]) == record["outside"])
+              and os.stat(long_path(path)).st_size == record["size_before"]
+              and outside_hash(path, record["start"], record["old_len"],
+                               record.get("verify", VERIFY_FULL)) == record["outside"])
     except OSError as exc:
         raise RestoreError(f"no se pudo restaurar {path}: {exc}. "
                            f"El diario de recuperación se conserva en {journal.folder}.") from exc
@@ -251,15 +294,15 @@ def required_space(size_after: int) -> int:
 
 def _rewrite_file(path: Path, start: int, old_len: int, new: bytes, before: str, check) -> None:
     """Reescribe el archivo completo en un temporal y lo reemplaza de forma atómica."""
-    size = os.stat(path).st_size
+    size = os.stat(long_path(path)).st_size
     need = required_space(size + len(new) - old_len)
-    free = shutil.disk_usage(path.parent).free
+    free = shutil.disk_usage(long_path(path.parent)).free
     if free < need:
         raise WriteError(f"espacio insuficiente para la reescritura completa: requiere {need} bytes, "
                          f"hay {free}")
     temporary = path.with_name(path.name + TEMP_SUFFIX)
     try:
-        with open(path, "rb") as source, open(temporary, "wb") as target:
+        with open(long_path(path), "rb") as source, open(long_path(temporary), "wb") as target:
             remaining = start
             while remaining > 0:
                 chunk = source.read(min(_CHUNK, remaining))
@@ -271,17 +314,17 @@ def _rewrite_file(path: Path, start: int, old_len: int, new: bytes, before: str,
                 _write(target, chunk)
             target.flush()
             os.fsync(target.fileno())
-        shutil.copymode(path, temporary)
+        shutil.copymode(long_path(path), long_path(temporary))
         problems = check(temporary)
         if problems:
             raise WriteError("la verificación de la copia falló: " + "; ".join(problems))
-        os.replace(temporary, path)
+        os.replace(long_path(temporary), long_path(path))
         _fsync_dir(path.parent)
     except OSError as exc:
         raise WriteError(f"no se pudo reescribir el archivo ({exc}); el original no cambió") from exc
     finally:
-        if temporary.exists():
-            temporary.unlink()
+        if os.path.exists(long_path(temporary)):
+            os.unlink(long_path(temporary))
 
 
 def rewrite_with(path: Path, signature: tuple[int, int], modify, check) -> dict:
@@ -295,35 +338,35 @@ def rewrite_with(path: Path, signature: tuple[int, int], modify, check) -> dict:
         raise ChangedError("el archivo cambió desde que se planearon los cambios")
     size = signature[0]
     need = required_space(size)
-    free = shutil.disk_usage(path.parent).free
+    free = shutil.disk_usage(long_path(path.parent)).free
     if free < need:
         raise WriteError(f"espacio insuficiente para la reescritura completa: requiere {need} bytes, hay {free}")
     original_sha = file_sha256(path)
     temporary = path.with_name(path.name + TEMP_SUFFIX)
     try:
-        shutil.copyfile(path, temporary)
-        shutil.copymode(path, temporary)
+        shutil.copyfile(long_path(path), long_path(temporary))
+        shutil.copymode(long_path(path), long_path(temporary))
         modify(temporary)
-        with open(temporary, "rb+") as handle:
+        with open(long_path(temporary), "rb+") as handle:
             os.fsync(handle.fileno())
         problems = check(path, temporary)
         if problems:
             raise WriteError("la verificación de la copia falló: " + "; ".join(problems))
         new_sha = file_sha256(temporary)
-        size_after = os.stat(temporary).st_size
-        os.replace(temporary, path)
+        size_after = os.stat(long_path(temporary)).st_size
+        os.replace(long_path(temporary), long_path(path))
         _fsync_dir(path.parent)
     except OSError as exc:
         raise WriteError(f"no se pudo reescribir el archivo ({exc}); el original no cambió") from exc
     finally:
-        if temporary.exists():
-            temporary.unlink()
+        if os.path.exists(long_path(temporary)):
+            os.unlink(long_path(temporary))
     return {"old_sha": original_sha, "new_sha": new_sha, "size_before": size, "size_after": size_after}
 
 
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
-    with open(path, "rb") as handle:
+    with open(long_path(path), "rb") as handle:
         while chunk := handle.read(_CHUNK):
             digest.update(chunk)
     return digest.hexdigest()
@@ -355,11 +398,12 @@ def recover(backup_folder: Path, root: Path) -> list[tuple[str, str, str]]:
         if not path.is_absolute():
             path = Path(root) / path
         try:
-            size = os.stat(path).st_size
+            size = os.stat(long_path(path)).st_size
             new_region = read_at(path, record["start"], record["new_len"])
             old_region = read_at(path, record["start"], record["old_len"])
             if size == record["size_after"] and sha256(new_region) == record["new_sha"] \
-                    and outside_hash(path, record["start"], record["new_len"]) == record["outside"]:
+                    and outside_hash(path, record["start"], record["new_len"],
+                                     record.get("verify", VERIFY_FULL)) == record["outside"]:
                 journal.end(name)
                 results.append((name, RECOVERED_COMPLETE, "la escritura había terminado"))
                 continue
@@ -373,6 +417,6 @@ def recover(backup_folder: Path, root: Path) -> list[tuple[str, str, str]]:
             results.append((name, RECOVERED_FAILED, str(exc)))
         # Copias temporales de reescrituras completas que no llegaron a reemplazar.
         temporary = path.with_name(path.name + TEMP_SUFFIX)
-        if temporary.exists():
-            temporary.unlink()
+        if os.path.exists(long_path(temporary)):
+            os.unlink(long_path(temporary))
     return results

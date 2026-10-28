@@ -268,7 +268,15 @@ def _library_root(folder: Path, manifest: dict) -> Path:
     return Path(manifest["root"])
 
 
+def _is_run(folder: Path) -> bool:
+    """True si la carpeta es una ejecución de formato 3 (estado.json + plan + diario)."""
+    return (Path(folder) / "estado.json").is_file()
+
+
 def load_manifest(folder: Path) -> dict:
+    if _is_run(folder):
+        from choconostle.run import Run
+        return Run(folder).manifest
     path = Path(folder) / MANIFEST_NAME
     if not path.is_file():
         raise FileNotFoundError(f"No se encontró {MANIFEST_NAME} en {folder}")
@@ -284,6 +292,9 @@ def revert(folder: Path, force: bool = False, dry_run: bool = False) -> list[Rev
     manual), se reporta como conflicto y no se toca, salvo con force=True.
     """
     folder = Path(folder)
+    if _is_run(folder):
+        from choconostle.run import revert_run
+        return revert_run(folder, force=force, dry_run=dry_run)
     manifest = load_manifest(folder)
     root = _library_root(folder, manifest)
     results: list[RevertResult] = []
@@ -427,6 +438,9 @@ def recover_session(folder: Path) -> list[tuple[str, str, str]]:
     aplicada; una que no empezó o se restauró, como no aplicada.
     """
     folder = Path(folder)
+    if _is_run(folder):
+        from choconostle.run import recover_run
+        return recover_run(folder)
     manifest = load_manifest(folder)
     root = _library_root(folder, manifest)
     results = recover(folder, root)

@@ -6,7 +6,10 @@ Interfaz de línea de comandos.
 Uso:
     choconostle scan RUTA [--group-by folder|tag] [--json reporte.json]
     choconostle normalize-lyrics RUTA --strip-headers|--standardize-headers [--apply]
+    choconostle normalize-lyrics RUTA --resume CARPETA_DE_RESPALDO
     choconostle revert CARPETA_DE_RESPALDO
+    choconostle recover CARPETA_DE_RESPALDO
+    choconostle clean-backups RUTA --older-than DÍAS [--apply]
     choconostle version
 
 Autor: Andrew
@@ -15,6 +18,7 @@ Licencia: MIT
 
 from __future__ import annotations
 
+import shutil
 import sys
 from enum import Enum
 from pathlib import Path
@@ -22,20 +26,26 @@ from typing import List, Optional
 
 import typer
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.progress import (
+    BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 
 from choconostle.config import APP_CODENAME, APP_DESCRIPTION, APP_NAME, APP_VERSION
 from choconostle import backup
+from choconostle import run as runs
 from choconostle.normalizer import (
     ENCODING_KEEP, MODE_STANDARDIZE, MODE_STRIP, OFFSET_FIRST, OFFSET_LAST, OFFSET_SKIP, OFFSET_SUM,
-    LyricsNormalizer, PendingWritesError, SelectionError, pending_sessions, select,
+    LyricsNormalizer, PendingWritesError, pending_sessions,
 )
-from choconostle.rawtags.writer import RestoreError
+from choconostle.rawtags.writer import VERIFY_FULL, VERIFY_QUICK
 from choconostle.report import (
-    build_report, print_normalize_plan, print_report, print_revert, write_json,
+    build_report, print_report, print_revert, print_run_report, write_json,
 )
-from choconostle.scanner import LibraryScan, scan_directory
+from choconostle.scanner import LibraryScan, count_files, scan_directory
 from choconostle.textio import EncodingOptionError, parse_target_encoding
+from choconostle.utils import format_size
+from rich.text import Text
 
 app = typer.Typer(
     help=APP_DESCRIPTION,
@@ -47,6 +57,11 @@ app = typer.Typer(
 class GroupBy(str, Enum):
     folder = "folder"
     tag = "tag"
+
+
+class Verify(str, Enum):
+    full = VERIFY_FULL
+    quick = VERIFY_QUICK
 
 
 class OffsetPolicy(str, Enum):
@@ -181,18 +196,39 @@ def normalize_lyrics(
     limit: Optional[int] = typer.Option(
         None, "--limit", "-l",
         help="Máximo de canciones por lista en pantalla (0 = sin límite). "
-             "Por defecto 20, o sin límite con --diff.",
+             "Por defecto 20; sin límite con --diff o --apply (registro.txt siempre tiene la lista completa).",
     ),
     include_hidden: bool = typer.Option(
         False, "--include-hidden",
         help="Incluye carpetas y archivos ocultos (que empiezan con '.').",
     ),
-    no_progress: bool = typer.Option(False, "--no-progress", help="No muestra el progreso del escaneo."),
+    no_progress: bool = typer.Option(False, "--no-progress", help="No muestra el progreso."),
+    resume: Optional[Path] = typer.Option(
+        None, "--resume",
+        help="Continúa una ejecución interrumpida (carpeta <biblioteca>/ChoconostleLRCTool_back/<fecha-hora>). "
+             "Usa las opciones guardadas y solo sigue si el diario, el respaldo y los archivos son coherentes.",
+    ),
+    verify: Verify = typer.Option(
+        Verify.full, "--verify",
+        help="Verificación tras escribir en archivos de audio: full (hash de todo el audio, antes y después) "
+             "o quick (etiquetas byte a byte, tamaño y el primer y último MB del audio).",
+    ),
 ) -> None:
     """Quita o estandariza las cabeceras de las letras (archivos y etiquetas incrustadas)."""
     _safe_streams()
     console = Console(highlight=False)
     error_console = Console(stderr=True, highlight=False)
+
+    path = path.expanduser()
+    if not path.is_dir():
+        error_console.print(f"No es una carpeta: {path}", style="red", markup=False)
+        raise typer.Exit(code=2)
+    show_limit = (0 if diff or apply or resume else 20) if limit is None else limit
+    progress = _RunProgress(error_console, enabled=not no_progress and error_console.is_terminal)
+
+    if resume is not None:
+        _resume(path, resume.expanduser(), console, error_console, progress, show_limit, diff)
+        return
 
     if strip_headers == standardize_headers:
         error_console.print("Elige un modo: --strip-headers o --standardize-headers.", style="red")
@@ -204,53 +240,153 @@ def normalize_lyrics(
         error_console.print(str(exc), style="red", markup=False)
         raise typer.Exit(code=2)
 
-    path = path.expanduser()
-    if not path.is_dir():
-        error_console.print(f"No es una carpeta: {path}", style="red", markup=False)
-        raise typer.Exit(code=2)
-
     pending = pending_sessions(path)
     if pending:
         error_console.print(str(PendingWritesError(pending)), style="yellow", markup=False)
         if apply:
             raise typer.Exit(code=2)
 
-    result = _scan(path, include_hidden, no_progress, error_console)
-    try:
-        tracks, orphans = select(result, only or [])
-    except SelectionError as exc:
-        error_console.print(str(exc), style="red", markup=False)
-        raise typer.Exit(code=2)
-
     normalizer = LyricsNormalizer(
         mode, encoding, strip_unknown=strip_unknown_headers,
         offset_policy=offset_policy.value, skip_near_empty=skip_near_empty,
         allow_full_rewrite=allow_full_rewrite,
     )
-    changes = normalizer.plan(result, tracks, orphans)
+    execution = runs.Run.create(path, "normalize-lyrics", dict(normalizer.options(), verify=verify.value),
+                                temporary=not apply)
+    keep_folder = apply
     try:
-        session = normalizer.apply(changes, path) if apply else None
-    except PendingWritesError as exc:
+        progress.start_plan(count_files(path, include_hidden))
+        totals = runs.plan_library(execution, normalizer, path, only or [], include_hidden, progress)
+        progress.stop()
+        if execution.state.get("missing_albums"):
+            names = ", ".join(execution.state["missing_albums"])
+            error_console.print(f"No se encontró una carpeta ni un álbum llamado: {names}", style="red",
+                                markup=False)
+            keep_folder = False
+            raise typer.Exit(code=2)
+        summary = None
+        if apply and totals.entries == 0:
+            keep_folder = False  # nada que aplicar: no se crea respaldo
+        elif apply:
+            try:
+                progress.start_apply(totals.entries)
+                summary = runs.apply_run(execution, normalizer, path, progress, verify=verify.value)
+            except runs.InsufficientSpace as exc:
+                progress.stop()
+                error_console.print(str(exc), style="red", markup=False)
+                error_console.print(f'Cuando haya espacio: choconostle normalize-lyrics "{path}" '
+                                    f'--resume "{execution.folder}"', markup=False)
+                raise typer.Exit(code=2)
+            except KeyboardInterrupt:
+                progress.stop()
+                error_console.print(f'Interrumpido. Para continuar: choconostle normalize-lyrics "{path}" '
+                                    f'--resume "{execution.folder}"', style="yellow", markup=False)
+                raise typer.Exit(code=130)
+            finally:
+                progress.stop()
+        print_run_report(execution, console=console, limit=show_limit, show_diff=diff, applied=apply,
+                         summary=summary or (runs.ApplySummary() if apply else None),
+                         options=_option_lines(execution.state["options"]))
+        _exit_for(summary)
+    finally:
+        if not keep_folder:
+            shutil.rmtree(execution.folder, ignore_errors=True)
+
+
+def _option_lines(options: dict) -> list[str]:
+    lines = [f"Política de offset: {options['offset_policy']}"]
+    if options.get("strip_unknown_headers"):
+        lines.append("Cabeceras desconocidas del inicio: se quitan")
+    if options.get("skip_near_empty"):
+        lines.append("Letras casi vacías: se omiten")
+    if options.get("allow_full_rewrite"):
+        lines.append("Reescritura completa de archivos de audio: permitida")
+    if options.get("verify") == "quick":
+        lines.append("Verificación tras escribir: rápida (etiquetas, tamaño, primer y último MB)")
+    return lines
+
+
+def _exit_for(summary) -> None:
+    if summary is None:
+        return
+    if summary.stopped:
+        raise typer.Exit(code=3)
+    if summary.failed:
+        raise typer.Exit(code=1)
+
+
+def _resume(path, folder, console, error_console, progress, show_limit, diff) -> None:
+    try:
+        execution = runs.Run(folder)
+    except (FileNotFoundError, ValueError) as exc:
+        error_console.print(f"No se puede reanudar: {exc}", style="red", markup=False)
+        raise typer.Exit(code=2)
+    options = execution.state["options"]
+    normalizer = LyricsNormalizer.from_options(options)
+    problems = runs.resume_check(execution, path, normalizer)
+    if problems:
+        error_console.print("No se puede reanudar con seguridad; no se modificó nada:", style="red")
+        for problem in problems:
+            error_console.print(f"  - {problem}", style="red", markup=False)
+        raise typer.Exit(code=2)
+    _intents, done = execution.outcome()
+    try:
+        progress.start_apply(execution.state["totals"]["entries"], completed=len(done))
+        summary = runs.apply_run(execution, normalizer, path, progress, resume=True,
+                                 verify=options.get("verify", "full"))
+    except runs.InsufficientSpace as exc:
         error_console.print(str(exc), style="red", markup=False)
         raise typer.Exit(code=2)
-    except RestoreError as exc:
-        error_console.print(f"ERROR GRAVE, se detuvo la operación: {exc}", style="red", markup=False)
-        raise typer.Exit(code=3)
-    options = [f"Política de offset: {offset_policy.value}"]
-    if strip_unknown_headers:
-        options.append("Cabeceras desconocidas del inicio: se quitan")
-    if skip_near_empty:
-        options.append("Letras casi vacías: se omiten")
-    if allow_full_rewrite:
-        options.append("Reescritura completa de archivos de audio: permitida")
-    print_normalize_plan(
-        changes, path, mode, encoding, console=console,
-        limit=(0 if diff else 20) if limit is None else limit,
-        show_diff=diff, session=session, options=options,
-    )
-    if session is not None and any(item["status"] != backup.ITEM_APPLIED
-                                   for item in session.manifest["items"]):
-        raise typer.Exit(code=1)
+    finally:
+        progress.stop()
+    print_run_report(execution, console=console, limit=show_limit, show_diff=diff, applied=True,
+                     summary=summary, options=_option_lines(options) + ["Reanudada"])
+    _exit_for(summary)
+
+
+class _RunProgress:
+    """Progreso en la terminal: archivos, cambios, errores, tiempo y tiempo restante estimado."""
+
+    def __init__(self, console: Console, enabled: bool):
+        self.enabled = enabled
+        self.console = console
+        self.progress = None
+        self.task = None
+
+    def _start(self, description: str, total: int | None, completed: int = 0) -> None:
+        self.stop()
+        if not self.enabled:
+            return
+        self.progress = Progress(
+            SpinnerColumn(), TextColumn("{task.description}"), BarColumn(), MofNCompleteColumn(),
+            TextColumn("{task.fields[stats]}"), TimeElapsedColumn(),
+            TextColumn("restante (estimado)"), TimeRemainingColumn(),
+            console=self.console, transient=True,
+        )
+        self.progress.start()
+        self.task = self.progress.add_task(description, total=total, completed=completed, stats="")
+
+    def start_plan(self, total: int) -> None:
+        self._start("Planificando", total)
+
+    def start_apply(self, total: int, completed: int = 0) -> None:
+        self._start("Aplicando", total, completed)
+
+    def advance(self, totals) -> None:
+        if self.progress is not None:
+            stats = (f"cambios {totals.statuses.get('change', 0)}  "
+                     f"errores {totals.statuses.get('error', 0)}")
+            self.progress.update(self.task, completed=totals.files_seen, stats=stats)
+
+    def applied(self, summary) -> None:
+        if self.progress is not None:
+            self.progress.update(self.task, advance=1,
+                                 stats=f"aplicados {summary.applied}  errores {summary.failed}")
+
+    def stop(self) -> None:
+        if self.progress is not None:
+            self.progress.stop()
+            self.progress = None
 
 
 @app.command()
@@ -301,6 +437,42 @@ def recover(
         console.print(f"  {name}: {names.get(status, status)} - {message}", markup=False)
     if any(status == "failed" for _n, status, _m in results):
         raise typer.Exit(code=1)
+
+
+@app.command("clean-backups")
+def clean_backups(
+    path: Path = typer.Argument(..., help="Carpeta de la biblioteca musical."),
+    older_than: int = typer.Option(
+        ..., "--older-than", min=0,
+        help="Antigüedad mínima en días (número entero, p. ej. 30).",
+    ),
+    apply: bool = typer.Option(
+        False, "--apply",
+        help="Borra los respaldos. Sin esta opción solo se muestra qué se borraría.",
+    ),
+) -> None:
+    """Borra respaldos antiguos de ChoconostleLRCTool_back (nunca los incompletos o reanudables)."""
+    _safe_streams()
+    console = Console(highlight=False)
+    path = path.expanduser()
+    remove, keep = runs.clean_backups(path, older_than, apply=apply)
+    title = "BORRADOS" if apply else "SIMULACIÓN (no se borró nada)"
+    console.print(f"[bold]clean-backups - {title}[/bold]")
+    console.print(Text(f"Respaldos de más de {older_than} días en {path / 'ChoconostleLRCTool_back'}"))
+    console.print()
+    label = "Borrados" if apply else "Se borrarían"
+    console.print(f"{label} ({len(remove)}, {format_size(sum(i.size for i in remove))}):", markup=False)
+    for info in remove:
+        when = info.created.strftime("%Y-%m-%d %H:%M") if info.created else "?"
+        console.print(Text(f"  {info.folder.name}  {when}  {format_size(info.size)}  ({info.state})"))
+    console.print(f"Se conservan ({len(keep)}):", markup=False)
+    for info in keep:
+        console.print(Text(f"  {info.folder.name}  {info.state}: {info.keep_reason}",
+                           style="yellow" if "reanudable" in (info.keep_reason or "")
+                           or "interrumpidas" in (info.keep_reason or "") else ""))
+    if remove and not apply:
+        console.print()
+        console.print("Para borrarlos, repite el comando con --apply.", markup=False)
 
 
 @app.command()

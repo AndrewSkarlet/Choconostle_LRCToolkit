@@ -4,6 +4,34 @@
 
 ### Pendiente
 - Etapa 4 (`convert-lyrics`): opción de desempate de codificación, p. ej. `--prefer-encoding cp1252`. Serviría cuando charset-normalizer devuelve candidatos empatados de familias distintas (como cp1250 y cp1252 en español) y hoy el archivo se considera ambiguo.
+- Etapa 6: medir memoria y tiempo con bibliotecas sintéticas de tamaño creciente. Sigue creciendo con la biblioteca la tabla de resultados por entrada que se arma al reanudar, revertir y mostrar el reporte (un diccionario de identificadores).
+- Decidir si `--verify quick` debe ser el valor predeterminado en tarjetas SD (ver la medición en el README).
+
+### Etapa 3: bibliotecas grandes, reanudación y limpieza
+
+#### Agregado
+- Ejecución en dos pasadas, con todo en disco:
+  - `estado.json`, `plan.jsonl`, `diario.jsonl` (intent/done con fsync), `originales/`, `pendiente/` y `registro.txt`, que se escribe a medida que avanza.
+  - El escáner recorre carpeta por carpeta (`scanner.iter_folders`) y la simulación usa una carpeta temporal fuera de la biblioteca.
+- Progreso con archivos procesados, cambios, errores, tiempo transcurrido y tiempo restante estimado.
+- `--resume CARPETA`: continúa una ejecución detenida solo si el diario, el respaldo y los archivos ya procesados son coherentes; si no, explica por qué y no toca nada.
+- Comprobación de espacio libre antes de aplicar. Si el disco se llena (ENOSPC), la ejecución se detiene y el archivo en curso se restaura.
+- Desconexión de la unidad (EIO, ENODEV, biblioteca inaccesible): la ejecución se detiene sin dar por aplicado lo que no se confirmó.
+- Rutas largas en Windows (prefijo `\\?\`).
+- `--verify full|quick` y `tools/medir_verificacion.py`.
+- Comando `clean-backups RUTA --older-than DÍAS [--apply]`: es una simulación por defecto y nunca borra ejecuciones incompletas, reanudables o con escrituras pendientes.
+- Pruebas: corte en cada paso del diario (inicio, copia, intent, escritura, después de escribir, done) para .lrc, MP3, FLAC, M4A y Opus, y a mitad de una escritura de bytes. También: falta de espacio antes de empezar y a mitad, desconexión simulada con la CLI, archivos modificados entre planificación y aplicación, negativas de `--resume`, `clean-backups`, frames repetidos, rutas largas y `--verify quick`.
+
+#### Cambiado
+- `--apply` muestra la lista completa de canciones, con el mismo criterio que `--diff`. `--limit N` la acorta, y `registro.txt` siempre la tiene entera.
+- Con `--apply` y nada que modificar, el encabezado dice «APLICADO: no había nada que aplicar» y no se crea respaldo.
+- Varias letras del mismo tipo en un archivo tienen etiquetas distintas («USLT [eng]», «LYRICS #2»...) en el diff, el registro y `revert`.
+- El reporte de `scan` ya no dice que `normalize-lyrics` no modifica las letras casi vacías.
+- Al restaurar un archivo tras una escritura fallida también se restaura su fecha de modificación.
+
+#### Incompatibilidades
+- Las ejecuciones nuevas usan el formato 3 (`estado.json`, `plan.jsonl`, `diario.jsonl`) en lugar de `manifiesto.json`. `revert` sigue leyendo los formatos 1 y 2.
+- Un error de E/S (EIO) detiene toda la ejecución en lugar de marcar solo ese archivo como fallido.
 
 ### Etapa 2: letras incrustadas editadas byte a byte
 

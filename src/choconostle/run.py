@@ -1,0 +1,1115 @@
+"""
+run.py
+
+Ejecución en dos pasadas de normalize-lyrics, pensada para bibliotecas
+grandes en tarjetas SD.
+
+1. Planificación: se recorre la biblioteca carpeta por carpeta y cada
+   cambio se escribe en plan.jsonl (en disco, no en memoria), con los
+   hashes del original y del resultado y las diferencias para el
+   registro.
+2. Aplicación: se lee plan.jsonl y se aplica cada entrada. Antes de
+   escribir se comprueba que el original no cambió y que el resultado
+   recalculado es exactamente el planeado.
+
+Carpeta de una ejecución (<biblioteca>/ChoconostleLRCTool_back/<fecha-hora>/):
+
+    estado.json    fase, opciones, totales y espacio necesario
+    plan.jsonl     una línea por archivo de letra o de audio; termina con {"type": "end"}
+    diario.jsonl   eventos con fsync: "intent" antes de escribir, "done" después
+    originales/    copia de cada .lrc/.txt modificado y parches de las incrustadas
+    pendiente/     diario de escritura byte a byte (rawtags.writer)
+    registro.txt   registro legible, escrito a medida que avanza
+
+Pasos de cada entrada (una interrupción en cualquiera se resuelve con
+--resume o revert):
+
+    1. copia de respaldo (fsync)   2. evento "intent" (fsync)
+    3. escritura                    4. verificación     5. evento "done" (fsync)
+
+Autor: Andrew
+Licencia: MIT
+"""
+
+from __future__ import annotations
+
+import errno
+import json
+import os
+import shutil
+import tempfile
+from collections import Counter
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+
+from choconostle.config import APP_NAME, APP_VERSION, BACKUP_DIR_NAME
+from choconostle.embedded import open_editor
+from choconostle.rawtags import MODE_FULL, Unsupported, apply_patches, patches_to_json, sha256
+from choconostle.rawtags.ogg import OggEditor
+from choconostle.rawtags.writer import (
+    TEMP_SUFFIX, VERIFY_FULL, ChangedError, Journal, RestoreError, WriteError, file_sha256,
+    file_signature, read_at, recover, rewrite_with, write_edit,
+)
+from choconostle.scanner import iter_folders
+from choconostle.textio import diff_lines
+from choconostle.utils import format_size, fsync_file, long_path, plural, write_file_atomic
+
+FORMAT = 3
+STATE_NAME = "estado.json"
+PLAN_NAME = "plan.jsonl"
+DIARY_NAME = "diario.jsonl"
+LOG_NAME = "registro.txt"
+ORIGINALS_DIR = "originales"
+
+STATE_PLANNING = "planning"
+STATE_PLANNED = "planned"
+STATE_APPLYING = "applying"
+STATE_INTERRUPTED = "interrupted"
+STATE_COMPLETED = "completed"
+STATE_NAMES = {
+    STATE_PLANNING: "planificando (no terminó)",
+    STATE_PLANNED: "planificada, sin aplicar",
+    STATE_APPLYING: "aplicando (no terminó)",
+    STATE_INTERRUPTED: "interrumpida",
+    STATE_COMPLETED: "completada",
+}
+
+APPLIED = "applied"
+FAILED = "failed"
+
+# Margen de espacio libre además del estimado.
+SPACE_MARGIN = 16 * 1024 * 1024
+
+# Errores que detienen toda la ejecución (no solo el archivo actual).
+_SPACE_ERRNOS = {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}
+_DEVICE_ERRNOS = {errno.EIO, errno.ENODEV, errno.ENXIO, getattr(errno, "ESTALE", errno.EIO),
+                  errno.EROFS, getattr(errno, "ENOMEDIUM", errno.ENODEV)}
+_SPACE_WINERRORS = {39, 112}  # ERROR_HANDLE_DISK_FULL, ERROR_DISK_FULL
+_DEVICE_WINERRORS = {21, 1167, 1117, 483}  # no preparado, desconectado, E/S, error de dispositivo
+
+
+def checkpoint(step: str, record: dict) -> None:
+    """Punto entre pasos del diario (las pruebas lo usan para simular cortes)."""
+
+
+class StopRun(Exception):
+    """La ejecución se detiene: sin espacio, unidad desconectada o interrupción."""
+
+    def __init__(self, kind: str, message: str):
+        self.kind = kind
+        super().__init__(message)
+
+
+class ResumeError(Exception):
+    """--resume no puede continuar con seguridad."""
+
+    def __init__(self, problems: list[str]):
+        self.problems = problems
+        super().__init__("; ".join(problems))
+
+
+# --------------------------------------------------------------------------
+# Utilidades
+# --------------------------------------------------------------------------
+
+def _rel(path: Path, root: Path) -> str:
+    try:
+        return Path(path).relative_to(root).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def write_json_atomic(path: Path, data: dict) -> None:
+    temporary = path.with_name(path.name + ".tmp")
+    with open(long_path(temporary), "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(data, ensure_ascii=False, indent=2))
+        fsync_file(handle)
+    os.replace(long_path(temporary), long_path(path))
+
+
+def iter_jsonl(path: Path):
+    """Líneas JSON de un archivo. Una última línea a medias (corte al escribir) se ignora."""
+    if not path.exists():
+        return
+    with open(long_path(path), "r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.endswith("\n"):
+                return
+            yield json.loads(line)
+
+
+def _safe_name(name: str, limit: int = 80) -> str:
+    import re
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(" .") or "letra"
+    return name[:limit]
+
+
+def fatal_kind(exc: BaseException, root: Path) -> str | None:
+    """"space", "device" o None según el error (y si la biblioteca sigue accesible)."""
+    seen = set()
+    current = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, OSError):
+            if current.errno in _SPACE_ERRNOS or getattr(current, "winerror", None) in _SPACE_WINERRORS:
+                return "space"
+            if current.errno in _DEVICE_ERRNOS or getattr(current, "winerror", None) in _DEVICE_WINERRORS:
+                return "device"
+        current = current.__cause__ or current.__context__
+    if not reachable(root):
+        return "device"
+    return None
+
+
+def reachable(root: Path) -> bool:
+    try:
+        return os.path.isdir(long_path(root)) and os.path.isdir(long_path(Path(root) / BACKUP_DIR_NAME))
+    except OSError:
+        return False
+
+
+# --------------------------------------------------------------------------
+# Carpeta de la ejecución
+# --------------------------------------------------------------------------
+
+class Run:
+    """Una ejecución (planificación + aplicación) guardada en disco."""
+
+    def __init__(self, folder: Path):
+        self.folder = Path(folder)
+        path = self.folder / STATE_NAME
+        if not path.is_file():
+            raise FileNotFoundError(f"No se encontró {STATE_NAME} en {folder}")
+        self.state = json.loads(path.read_text(encoding="utf-8"))
+        if self.state.get("format") != FORMAT:
+            raise ValueError(f"Formato de ejecución desconocido: {self.state.get('format')}")
+        self._diary = None
+
+    @classmethod
+    def create(cls, root: Path, command: str, options: dict, temporary: bool = False,
+               now: datetime | None = None) -> "Run":
+        now = now or datetime.now()
+        if temporary:
+            folder = Path(tempfile.mkdtemp(prefix="choconostle-simulacion-"))
+        else:
+            base = Path(root) / BACKUP_DIR_NAME
+            name = now.strftime("%Y-%m-%d_%H-%M-%S")
+            folder = base / name
+            counter = 2
+            while folder.exists():
+                folder = base / f"{name}_{counter}"
+                counter += 1
+            (folder / ORIGINALS_DIR).mkdir(parents=True)
+        state = {
+            "app": APP_NAME, "app_version": APP_VERSION, "format": FORMAT, "command": command,
+            "created_at": now.isoformat(timespec="seconds"), "root": str(root),
+            "options": options, "state": STATE_PLANNING, "temporary": temporary,
+        }
+        write_json_atomic(folder / STATE_NAME, state)
+        return cls(folder)
+
+    # -- estado -----------------------------------------------------------
+
+    @property
+    def phase(self) -> str:
+        return self.state["state"]
+
+    def save_state(self, **updates) -> None:
+        self.state.update(updates)
+        self.state["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        write_json_atomic(self.folder / STATE_NAME, self.state)
+
+    def library_root(self) -> Path:
+        # La ubicación real del respaldo manda: la biblioteca pudo cambiar de
+        # ruta (otra letra de unidad, /sdcard...).
+        if self.folder.parent.name == BACKUP_DIR_NAME:
+            return self.folder.parent.parent
+        return Path(self.state["root"])
+
+    # -- plan ----------------------------------------------------------------
+
+    def plan_records(self):
+        for record in iter_jsonl(self.folder / PLAN_NAME):
+            if record.get("type") != "end":
+                yield record
+
+    def plan_complete(self) -> bool:
+        last = None
+        for last in iter_jsonl(self.folder / PLAN_NAME):
+            pass
+        return bool(last and last.get("type") == "end")
+
+    # -- diario ----------------------------------------------------------------
+
+    def event(self, data: dict) -> None:
+        """Agrega un evento al diario con fsync."""
+        with open(long_path(self.folder / DIARY_NAME), "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(data, ensure_ascii=False) + "\n")
+            fsync_file(handle)
+
+    def events(self):
+        yield from iter_jsonl(self.folder / DIARY_NAME)
+
+    def outcome(self) -> tuple[dict, dict]:
+        """({id: evento intent}, {id: evento done}) (el último de cada uno)."""
+        intents, done = {}, {}
+        for event in self.events():
+            if event["event"] == "intent":
+                intents[event["id"]] = event
+            elif event["event"] == "done":
+                done[event["id"]] = event
+        return intents, done
+
+    def log(self, lines: list[str]) -> None:
+        with open(long_path(self.folder / LOG_NAME), "a", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+            handle.flush()
+
+    # -- compatibilidad ----------------------------------------------------
+
+    @property
+    def manifest(self) -> dict:
+        """Vista resumida tipo manifiesto (items por letra y ediciones por audio)."""
+        intents, done = self.outcome()
+        items, edits = [], []
+        for record in self.plan_records():
+            if record["status"] != "change":
+                continue
+            result = done.get(record["id"])
+            status = result["status"] if result else "pending"
+            error = result.get("error") if result else None
+            if record["type"] == "file":
+                items.append({"id": record["item"], "kind": "file", "path": record["path"],
+                              "label": record["label"], "status": status, "error": error,
+                              "details": record["details"]})
+                continue
+            changed = [slot for slot in record["slots"] if slot["status"] == "change"]
+            for slot in changed:
+                items.append({"id": slot["item"], "kind": "embedded", "path": record["path"],
+                              "label": slot["label"], "status": status, "error": error,
+                              "details": slot["details"], "edit": record["id"]})
+            intent = intents.get(record["id"], {})
+            edits.append(dict(intent, id=record["id"], path=record["path"], status=status, error=error,
+                              items=[slot["item"] for slot in changed]))
+        return {"manifest_version": FORMAT, "items": items, "edits": edits, "state": self.phase}
+
+
+# --------------------------------------------------------------------------
+# Registros del plan
+# --------------------------------------------------------------------------
+
+def _base_record(change) -> dict:
+    return {
+        "status": change.status, "label": change.label, "details": list(change.details),
+        "warnings": list(change.warnings), "message": change.message, "skip_reason": change.skip_reason,
+        "nearly_empty": change.nearly_empty, "unknown": list(change.unknown_headers),
+    }
+
+
+def _jsonable(value):
+    if isinstance(value, list):
+        return [[text, time] for text, time in value]
+    return value
+
+
+def python_value(value):
+    if isinstance(value, list):
+        return [(text, time) for text, time in value]
+    return value
+
+
+class RecordBuilder:
+    """Convierte LyricsChange en registros del plan, con identificadores."""
+
+    def __init__(self, root: Path, with_diff: bool = True):
+        self.root = Path(root)
+        self.with_diff = with_diff
+        self.next_id = 1
+        self.next_item = 1
+
+    def _ids(self) -> tuple[int, int]:
+        entry, item = self.next_id, self.next_item
+        self.next_id += 1
+        self.next_item += 1
+        return entry, item
+
+    def records(self, changes: list) -> list[dict]:
+        out = []
+        audio: dict[Path, dict] = {}
+        for change in changes:
+            if change.kind == "file":
+                entry, item = self._ids()
+                record = _base_record(change)
+                record.update({
+                    "type": "file", "id": entry, "item": item, "path": _rel(change.path, self.root),
+                    "track": _rel(change.track_path, self.root) if change.track_path else None,
+                    "headers": [list(pair) for pair in change.headers],
+                    "source_encoding": change.source_encoding, "approximate": change.approximate,
+                })
+                if change.original_bytes is not None:
+                    record.update({"original_sha": sha256(change.original_bytes),
+                                   "original_size": len(change.original_bytes),
+                                   "original_mtime": change.original_mtime})
+                if change.new_bytes is not None:
+                    record["new_sha"] = sha256(change.new_bytes)
+                if self.with_diff and change.status == "change":
+                    record["diff"] = diff_lines(change.original_text, change.new_text)
+                out.append(record)
+                continue
+            record = audio.get(change.path)
+            if record is None:
+                entry = self.next_id
+                self.next_id += 1
+                record = {"type": "audio", "id": entry, "path": _rel(change.path, self.root),
+                          "track": _rel(change.track_path, self.root) if change.track_path else None,
+                          "status": "unchanged", "plan": None, "slots": []}
+                try:
+                    record["size"] = os.stat(long_path(change.path)).st_size
+                except OSError:
+                    record["size"] = 0
+                audio[change.path] = record
+                out.append(record)
+            slot = _base_record(change)
+            slot.update({"item": self.next_item, "ref": change.slot.ref() if change.slot else None,
+                         "original": _jsonable(change.original_value), "new": _jsonable(change.new_value)})
+            self.next_item += 1
+            if self.with_diff and change.status == "change":
+                slot["diff"] = diff_lines(change.original_text, change.new_text)
+            record["slots"].append(slot)
+            if change.file_plan:
+                record["plan"] = change.file_plan
+        for record in audio.values():
+            statuses = [slot["status"] for slot in record["slots"]]
+            record["status"] = "change" if "change" in statuses else (statuses[0] if len(set(statuses)) == 1
+                                                                       else "unchanged")
+        return out
+
+
+# --------------------------------------------------------------------------
+# Totales
+# --------------------------------------------------------------------------
+
+@dataclass
+class Totals:
+    lyrics: int = 0
+    statuses: Counter = field(default_factory=Counter)
+    """Por letra (cada copia: archivo o etiqueta)."""
+    files_changed: int = 0
+    embedded_changed: int = 0
+    songs_changed: int = 0
+    entries: int = 0
+    """Entradas a aplicar (archivos de letra + archivos de audio)."""
+    nearly_empty: int = 0
+    unknown: int = 0
+    skip_reasons: Counter = field(default_factory=Counter)
+    """Archivos de audio omitidos por motivo."""
+    space: int = 0
+    """Espacio para el respaldo (copias y parches)."""
+    largest_rewrite: int = 0
+    """Mayor espacio temporal necesario a la vez (archivo temporal más grande)."""
+    files_seen: int = 0
+
+    def add(self, record: dict) -> None:
+        slots = [record] if record["type"] == "file" else record["slots"]
+        for slot in slots:
+            self.lyrics += 1
+            self.statuses[slot["status"]] += 1
+            self.nearly_empty += bool(slot["nearly_empty"])
+            self.unknown += bool(slot["unknown"])
+        reasons = {slot["skip_reason"] for slot in slots if slot["status"] == "skipped" and slot["skip_reason"]}
+        for reason in reasons:
+            self.skip_reasons[reason] += 1
+        if record["status"] != "change":
+            return
+        self.entries += 1
+        if record["type"] == "file":
+            self.files_changed += 1
+            size = record.get("original_size", 0)
+            self.space += size + 4096
+            self.largest_rewrite = max(self.largest_rewrite, size)
+        else:
+            changed = [slot for slot in slots if slot["status"] == "change"]
+            self.embedded_changed += len(changed)
+            lyric_bytes = sum(len(json.dumps(slot["original"], ensure_ascii=False)) for slot in changed)
+            self.space += 4 * lyric_bytes + 4096
+            if record["plan"] and record["plan"]["mode"] == MODE_FULL:
+                self.largest_rewrite = max(self.largest_rewrite, record.get("size", 0))
+            else:
+                # Diario de escritura (pre-imagen de la región, temporal).
+                self.largest_rewrite = max(self.largest_rewrite, 2 * lyric_bytes + 65536)
+
+    def needed(self) -> int:
+        return self.space + self.largest_rewrite + SPACE_MARGIN
+
+    def to_json(self) -> dict:
+        return {"lyrics": self.lyrics, "statuses": dict(self.statuses), "files_changed": self.files_changed,
+                "embedded_changed": self.embedded_changed, "songs_changed": self.songs_changed,
+                "entries": self.entries, "nearly_empty": self.nearly_empty, "unknown": self.unknown,
+                "skip_reasons": dict(self.skip_reasons), "space": self.space,
+                "largest_rewrite": self.largest_rewrite, "needed": self.needed(),
+                "files_seen": self.files_seen}
+
+
+# --------------------------------------------------------------------------
+# Pasada 1: planificación
+# --------------------------------------------------------------------------
+
+class SelectionError(Exception):
+    """Un valor de --only no corresponde a ninguna carpeta ni álbum."""
+
+
+def resolve_only(root: Path, only: list[str]) -> tuple[list[Path], set[str]]:
+    folders, albums = [], set()
+    for value in only or []:
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            candidate = Path(root) / candidate
+        if candidate.is_dir():
+            folders.append(candidate.resolve())
+        else:
+            albums.add(value.strip().lower())
+    return folders, albums
+
+
+def plan_library(run: Run, normalizer, root: Path, only: list[str] | None = None,
+                 include_hidden: bool = False, progress=None, with_diff: bool = True) -> Totals:
+    """
+    Recorre la biblioteca carpeta por carpeta y escribe el plan en disco.
+
+    En memoria solo están la carpeta actual y los totales.
+    """
+    root = Path(root)
+    folders, albums = resolve_only(root, only or [])
+    walk = None if albums else (folders or None)
+    builder = RecordBuilder(root, with_diff)
+    totals = Totals()
+    found_albums: set[str] = set()
+
+    def in_folders(path: Path) -> bool:
+        resolved = path.resolve()
+        return any(resolved == folder or folder in resolved.parents for folder in folders)
+
+    def on_file(_path):
+        totals.files_seen += 1
+        if progress is not None:
+            progress.advance(totals)
+
+    with open(long_path(run.folder / PLAN_NAME), "a", encoding="utf-8") as plan_file:
+        for folder_scan in iter_folders(root, include_hidden, on_file, folders=walk):
+            tracks, orphans = folder_scan.tracks, folder_scan.orphan_lyrics
+            if albums:
+                for track in tracks:
+                    if (track.album or "").lower() in albums:
+                        found_albums.add((track.album or "").lower())
+                tracks = [t for t in tracks if (t.album or "").lower() in albums or (folders and in_folders(t.filepath))]
+                orphans = [o for o in orphans if folders and in_folders(Path(o.location))]
+            records = builder.records(list(normalizer.plan_tracks(tracks, orphans)))
+            songs = set()
+            for record in records:
+                totals.add(record)
+                if record["status"] == "change":
+                    songs.add(record.get("track") or record["path"])
+                plan_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+            totals.songs_changed += len(songs)
+            plan_file.flush()
+        missing = sorted(albums - found_albums)
+        plan_file.write(json.dumps({"type": "end", "entries": totals.entries}) + "\n")
+        fsync_file(plan_file)
+    run.save_state(state=STATE_PLANNED, totals=totals.to_json(), missing_albums=missing)
+    return totals
+
+
+def plan_from_changes(run: Run, changes: list, root: Path) -> Totals:
+    """Escribe un plan a partir de cambios ya calculados en memoria (API de LyricsNormalizer)."""
+    builder = RecordBuilder(root, with_diff=True)
+    totals = Totals()
+    with open(long_path(run.folder / PLAN_NAME), "a", encoding="utf-8") as plan_file:
+        records = builder.records(changes)
+        songs = set()
+        for record in records:
+            totals.add(record)
+            if record["status"] == "change":
+                songs.add(record.get("track") or record["path"])
+            plan_file.write(json.dumps(record, ensure_ascii=False) + "\n")
+        totals.songs_changed = len(songs)
+        plan_file.write(json.dumps({"type": "end", "entries": totals.entries}) + "\n")
+        fsync_file(plan_file)
+    run.save_state(state=STATE_PLANNED, totals=totals.to_json(), missing_albums=[])
+    return totals
+
+
+# --------------------------------------------------------------------------
+# Pasada 2: aplicación
+# --------------------------------------------------------------------------
+
+class InsufficientSpace(Exception):
+    pass
+
+
+def check_space(run: Run, root: Path) -> None:
+    needed = run.state["totals"]["needed"]
+    free = shutil.disk_usage(long_path(root)).free
+    if free < needed:
+        raise InsufficientSpace(
+            f"Espacio libre insuficiente en la unidad de la biblioteca: se estiman {format_size(needed)} "
+            f"(respaldo {format_size(run.state['totals']['space'])} + temporal "
+            f"{format_size(run.state['totals']['largest_rewrite'])} + margen) y hay {format_size(free)}. "
+            "No se modificó nada.")
+
+
+@dataclass
+class ApplySummary:
+    applied: int = 0
+    failed: int = 0
+    stopped: str | None = None
+    """Motivo si la ejecución se detuvo antes de terminar."""
+    stop_kind: str | None = None
+
+
+def apply_run(run: Run, normalizer, root: Path, progress=None, resume: bool = False,
+              verify: str = VERIFY_FULL) -> ApplySummary:
+    """Aplica las entradas del plan que faltan. Se puede reanudar."""
+    root = Path(root)
+    summary = ApplySummary()
+    check_space(run, root)
+    intents, done = run.outcome()
+    if not resume:
+        _log_header(run, root)
+    else:
+        run.log(["", f"=== Reanudado el {datetime.now().isoformat(timespec='seconds')} ==="])
+    run.save_state(state=STATE_APPLYING)
+    journal = Journal(run.folder)
+    try:
+        for record in run.plan_records():
+            if record["status"] != "change" or record["id"] in done:
+                continue
+            if not reachable(root):
+                raise StopRun("device", "La biblioteca o su carpeta de respaldo ya no están accesibles "
+                                        "(¿se desconectó la tarjeta SD?).")
+            if record["type"] == "file":
+                status, error = _apply_file(run, normalizer, root, record)
+            else:
+                status, error = _apply_audio(run, root, record, journal, verify)
+            if status == APPLIED:
+                summary.applied += 1
+            else:
+                summary.failed += 1
+            if progress is not None:
+                progress.applied(summary)
+        run.save_state(state=STATE_COMPLETED)
+        _log_footer(run, summary)
+    except StopRun as stop:
+        summary.stopped = str(stop)
+        summary.stop_kind = stop.kind
+        try:
+            run.save_state(state=STATE_INTERRUPTED, stop_reason=str(stop), stop_kind=stop.kind)
+            run.log(["", f"=== DETENIDO: {stop} ===",
+                     f"Para continuar: choconostle normalize-lyrics \"{root}\" --resume \"{run.folder}\""])
+        except OSError:
+            pass  # la unidad ya no está: el diario en disco dice qué terminó
+    except KeyboardInterrupt:
+        try:
+            run.save_state(state=STATE_INTERRUPTED, stop_reason="interrumpido por el usuario", stop_kind="user")
+        except OSError:
+            pass
+        raise
+    return summary
+
+
+def _finish(run: Run, record: dict, status: str, error: str | None, extra: dict | None = None,
+            log_lines: list[str] | None = None) -> tuple[str, str | None]:
+    event = {"event": "done", "id": record["id"], "status": status, "error": error}
+    event.update(extra or {})
+    run.event(event)
+    run.log(_log_block(record, status, error) + (log_lines or []))
+    checkpoint("done", record)
+    return status, error
+
+
+def _stop_if_fatal(exc: BaseException, root: Path) -> None:
+    kind = fatal_kind(exc, root)
+    if kind == "space":
+        raise StopRun("space", f"Sin espacio libre en la unidad ({exc}).") from exc
+    if kind == "device":
+        raise StopRun("device", f"La unidad dejó de responder ({exc}); ¿se desconectó la tarjeta SD?") from exc
+
+
+def _apply_file(run: Run, normalizer, root: Path, record: dict) -> tuple[str, str | None]:
+    path = root / record["path"]
+    checkpoint("start", record)
+    try:
+        current = Path(long_path(path)).read_bytes()
+    except OSError as exc:
+        _stop_if_fatal(exc, root)
+        return _finish(run, record, FAILED, f"no se pudo leer: {exc}")
+    if sha256(current) != record["original_sha"]:
+        return _finish(run, record, FAILED, "el archivo cambió desde que se planearon los cambios")
+    change = normalizer.plan_one_file(path, record["headers"])
+    if change.new_bytes is None or sha256(change.new_bytes) != record.get("new_sha"):
+        return _finish(run, record, FAILED, "el resultado ya no coincide con el plan")
+
+    copy = f"{ORIGINALS_DIR}/{record['id']:06d} - {_safe_name(path.name)}"
+    try:
+        with open(long_path(run.folder / copy), "wb") as handle:
+            handle.write(current)
+            fsync_file(handle)
+        checkpoint("backup", record)
+        run.event({"event": "intent", "id": record["id"], "copy": copy, "original_sha": record["original_sha"],
+                   "new_sha": record["new_sha"], "original_mtime": record.get("original_mtime")})
+        checkpoint("intent", record)
+        write_file_atomic(path, change.new_bytes)
+        checkpoint("written", record)
+        written = Path(long_path(path)).read_bytes()
+    except OSError as exc:
+        _stop_if_fatal(exc, root)
+        return _finish(run, record, FAILED, f"no se pudo escribir: {exc}")
+    if sha256(written) != record["new_sha"]:
+        try:
+            write_file_atomic(path, current)
+        except OSError as exc:
+            _stop_if_fatal(exc, root)
+        return _finish(run, record, FAILED, "la verificación tras escribir falló; se restauró el original")
+    return _finish(run, record, APPLIED, None)
+
+
+def _apply_audio(run: Run, root: Path, record: dict, journal: Journal, verify: str) -> tuple[str, str | None]:
+    path = root / record["path"]
+    plan = record["plan"]
+    changed = [slot for slot in record["slots"] if slot["status"] == "change"]
+    checkpoint("start", record)
+    try:
+        editor = open_editor(path)
+        if editor is None:
+            raise ChangedError("el archivo ya no tiene etiquetas")
+        if file_signature(path) != tuple(plan["signature"]):
+            raise ChangedError("el archivo cambió desde que se planearon los cambios")
+        if plan["region_sha"] is not None and sha256(editor.region) != plan["region_sha"]:
+            raise ChangedError("las etiquetas cambiaron desde que se planearon los cambios")
+        current = {(slot.key, slot.index): slot.value for slot in editor.slots()}
+        for slot in changed:
+            ref = slot["ref"]
+            if current.get((ref["key"], ref["index"])) != python_value(slot["original"]):
+                raise ChangedError("la letra cambió desde que se planearon los cambios")
+        values = {(slot["ref"]["key"], slot["ref"]["index"]): python_value(slot["new"]) for slot in changed}
+        edit = editor.build(values)
+        if edit.mode != plan["mode"]:
+            raise ChangedError("la forma de escribir cambió desde que se planearon los cambios")
+    except (Unsupported, ChangedError) as exc:
+        return _finish(run, record, FAILED, str(exc))
+    except OSError as exc:
+        _stop_if_fatal(exc, root)
+        return _finish(run, record, FAILED, f"no se pudo abrir: {exc}")
+
+    is_ogg = isinstance(editor, OggEditor)
+    intent = {"event": "intent", "id": record["id"], "writer": "mutagen-ogg" if is_ogg else "raw",
+              "format": editor.tag_format, "mode": edit.mode, "signature": plan["signature"],
+              "verify": verify}
+    try:
+        if is_ogg:
+            intent["old_sha"] = file_sha256(path)
+        else:
+            patches = f"{ORIGINALS_DIR}/edit-{record['id']:06d} - {_safe_name(path.name)}.json"
+            data = {"start": editor.start, "old_len": edit.old_len, "new_len": edit.new_len,
+                    "patches": patches_to_json(edit.patches)}
+            with open(long_path(run.folder / patches), "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(data))
+                fsync_file(handle)
+            intent.update({
+                "patches": patches, "start": editor.start, "old_len": edit.old_len, "new_len": edit.new_len,
+                "old_sha": sha256(editor.region), "new_sha": sha256(apply_patches(editor.region, edit.patches)),
+                "size_before": plan["signature"][0],
+                "size_after": plan["signature"][0] + edit.new_len - edit.old_len,
+            })
+        checkpoint("backup", record)
+        run.event(intent)
+        checkpoint("intent", record)
+        if is_ogg:
+            result = rewrite_with(path, tuple(plan["signature"]), lambda tmp: OggEditor.modify(tmp, values),
+                                  lambda original, tmp: editor.check(original, tmp, edit.expected))
+        else:
+            result = write_edit(path, editor, edit, journal, f"edit-{record['id']:06d}",
+                                tuple(plan["signature"]), record["path"], verify)
+        checkpoint("written", record)
+    except RestoreError as exc:
+        raise StopRun("restore", f"ERROR GRAVE en {record['path']}: {exc}") from exc
+    except (WriteError, OSError) as exc:
+        _stop_if_fatal(exc, root)
+        return _finish(run, record, FAILED, str(exc))
+    extra = {key: result[key] for key in ("new_sha", "size_after") if is_ogg and key in result}
+    return _finish(run, record, APPLIED, None, extra)
+
+
+# --------------------------------------------------------------------------
+# Registro (registro.txt)
+# --------------------------------------------------------------------------
+
+def _log_header(run: Run, root: Path) -> None:
+    options = run.state["options"]
+    totals = run.state["totals"]
+    run.log([
+        f"{APP_NAME} {APP_VERSION} - {run.state['command']}",
+        f"Fecha: {run.state['created_at']}",
+        f"Biblioteca: {root}",
+        "Opciones: " + ", ".join(f"{key}={value}" for key, value in options.items()),
+        f"Entradas a aplicar: {totals['entries']} ({totals['files_changed']} archivos de letra, "
+        f"{totals['embedded_changed']} letras incrustadas)",
+        "",
+        f'Para deshacer: choconostle revert "{run.folder}"',
+        "",
+    ])
+
+
+def _log_block(record: dict, status: str, error: str | None) -> list[str]:
+    names = {APPLIED: "aplicado", FAILED: "FALLÓ"}
+    lines = ["=" * 72]
+    if record["type"] == "file":
+        lines.append(f"[{record['id']:06d}] {record['path']}  (archivo)")
+        if record.get("track") and record["track"] != record["path"]:
+            lines.append(f"  Canción: {record['track']}")
+        lines.append(f"  Cambios: {'; '.join(record['details']) or '-'}")
+        if record.get("source_encoding"):
+            lines.append(f"  Codificación de origen: {record['source_encoding']}")
+        lines += [f"  Aviso: {warning}" for warning in record["warnings"]]
+        if record.get("approximate"):
+            lines.append("  Vista aproximada: la codificación de origen no se pudo confirmar; "
+                         "el archivo se modifica byte a byte sin depender de ella.")
+        lines.append(f"  Estado: {names.get(status, status)}" + (f" ({error})" if error else ""))
+        lines += ["  " + line for line in record.get("diff", [])]
+        return lines
+    lines.append(f"[{record['id']:06d}] {record['path']}  (audio)")
+    lines.append(f"  Estado: {names.get(status, status)}" + (f" ({error})" if error else ""))
+    for slot in record["slots"]:
+        if slot["status"] != "change":
+            continue
+        lines.append(f"  {slot['label']}: {'; '.join(slot['details']) or '-'}")
+        lines += [f"    Aviso: {warning}" for warning in slot["warnings"]]
+        lines += ["    " + line for line in slot.get("diff", [])]
+    return lines
+
+
+def _log_footer(run: Run, summary: ApplySummary) -> None:
+    run.log(["", f"Resultado: {plural(summary.applied, 'entrada')} aplicadas, "
+                 f"{plural(summary.failed, 'entrada')} con error."])
+
+
+# --------------------------------------------------------------------------
+# Reanudación
+# --------------------------------------------------------------------------
+
+def resume_check(run: Run, root: Path, normalizer) -> list[str]:
+    """
+    Comprueba que la ejecución se puede reanudar con seguridad y resuelve
+    las entradas que quedaron a medias. Retorna los problemas; si hay
+    alguno, no se cambió nada en la biblioteca.
+    """
+    root = Path(root)
+    problems = []
+    phase = run.phase
+    if run.state.get("command") != "normalize-lyrics":
+        problems.append(f"la ejecución es de otro comando ({run.state.get('command')}).")
+    if phase == STATE_COMPLETED:
+        problems.append("la ejecución ya está completada: no hay nada que reanudar.")
+    elif phase == STATE_PLANNING or not run.plan_complete():
+        problems.append("la planificación no terminó (no se aplicó nada): vuelve a ejecutar sin --resume.")
+    if run.folder.parent.parent.resolve() != root.resolve():
+        problems.append(f"la carpeta de respaldo no pertenece a esta biblioteca ({run.folder}).")
+    if problems:
+        return problems
+
+    # 1. Escrituras byte a byte interrumpidas (pre-imagen en pendiente/).
+    for name, status, message in recover(run.folder, root):
+        if status == "failed":
+            problems.append(f"no se pudo recuperar la escritura {name}: {message}")
+    if problems:
+        return problems
+
+    intents, done = run.outcome()
+    resolved = []
+    for record in run.plan_records():
+        if record["status"] != "change":
+            continue
+        entry = record["id"]
+        intent = intents.get(entry)
+        if entry in done and done[entry]["status"] == APPLIED:
+            problem = _check_applied(run, root, record, intent)
+            if problem:
+                problems.append(problem)
+        elif entry not in done and intent is not None:
+            state, problem = _resolve_intent(run, root, record, intent)
+            if problem:
+                problems.append(problem)
+            elif state == APPLIED:
+                resolved.append((record, intent))
+    if problems:
+        return problems
+    for record, intent in resolved:
+        run.event(dict({"event": "done", "id": record["id"], "status": APPLIED, "error": None,
+                        "note": "completada antes de la interrupción"}, **_applied_extra(root, record, intent)))
+        run.log(_log_block(record, APPLIED, None) + ["  (verificado al reanudar)"])
+    return []
+
+
+def _applied_extra(root: Path, record: dict, intent: dict) -> dict:
+    """Datos que el evento "done" de una reescritura Ogg necesita para revertir (hash del resultado)."""
+    if intent.get("writer") != "mutagen-ogg":
+        return {}
+    path = root / record["path"]
+    return {"new_sha": file_sha256(path), "size_after": file_signature(path)[0]}
+
+
+def _backup_ok(run: Run, record: dict, intent: dict) -> str | None:
+    if record["type"] == "file":
+        copy = run.folder / intent["copy"]
+        try:
+            data = Path(long_path(copy)).read_bytes()
+        except OSError:
+            return f"falta la copia de respaldo de {record['path']} ({intent['copy']})."
+        if sha256(data) != record["original_sha"]:
+            return f"la copia de respaldo de {record['path']} está dañada."
+        return None
+    if intent.get("writer") == "raw":
+        if not (run.folder / intent["patches"]).is_file():
+            return f"faltan los parches de respaldo de {record['path']}."
+    return None
+
+
+def _file_state(root: Path, record: dict, intent: dict | None) -> str:
+    """"new", "original", "changed" o "missing"."""
+    path = root / record["path"]
+    try:
+        if record["type"] == "file":
+            digest = sha256(Path(long_path(path)).read_bytes())
+            return {record.get("new_sha"): "new", record["original_sha"]: "original"}.get(digest, "changed")
+        if intent is None:
+            return "original"
+        if intent["writer"] == "mutagen-ogg":
+            digest = file_sha256(path)
+            if digest == intent["old_sha"]:
+                return "original"
+            return "new" if digest == intent.get("new_sha", digest) else "changed"
+        size = file_signature(path)[0]
+        if size == intent["size_after"] and sha256(read_at(path, intent["start"], intent["new_len"])) == intent["new_sha"]:
+            return "new"
+        if size == intent["size_before"] and sha256(read_at(path, intent["start"], intent["old_len"])) == intent["old_sha"]:
+            return "original"
+        return "changed"
+    except FileNotFoundError:
+        return "missing"
+
+
+def _check_applied(run: Run, root: Path, record: dict, intent: dict | None) -> str | None:
+    if intent is not None:
+        problem = _backup_ok(run, record, intent)
+        if problem:
+            return problem
+    done = {}
+    for event in run.events():
+        if event["event"] == "done" and event["id"] == record["id"]:
+            done = event
+    if intent is not None and intent.get("writer") == "mutagen-ogg":
+        intent = dict(intent, new_sha=done.get("new_sha"))
+    state = _file_state(root, record, intent)
+    if state != "new":
+        return (f"{record['path']} ya se había aplicado pero ahora "
+                + ("no existe." if state == "missing" else "es distinto: cambió fuera de la herramienta."))
+    return None
+
+
+def _resolve_intent(run: Run, root: Path, record: dict, intent: dict) -> tuple[str | None, str | None]:
+    problem = _backup_ok(run, record, intent)
+    if problem:
+        return None, problem
+    temporary = (root / record["path"]).with_name(Path(record["path"]).name + TEMP_SUFFIX)
+    if os.path.exists(long_path(temporary)):
+        os.unlink(long_path(temporary))
+    if intent.get("writer") == "mutagen-ogg":
+        state = _file_state(root, record, dict(intent, new_sha=None))
+        if state == "changed":
+            # El reemplazo atómico se completó: se comprueba que las letras son las planeadas.
+            editor = open_editor(root / record["path"])
+            values = {(s.key, s.index): s.value for s in editor.slots()}
+            ok = all(values.get((slot["ref"]["key"], slot["ref"]["index"])) == python_value(slot["new"])
+                     for slot in record["slots"] if slot["status"] == "change")
+            state = "new" if ok else "changed"
+    else:
+        state = _file_state(root, record, intent)
+    if state == "new":
+        return APPLIED, None
+    if state == "original":
+        return "pending", None
+    if state == "missing":
+        return None, f"{record['path']} desapareció durante una escritura interrumpida."
+    return None, (f"{record['path']} no es ni el original ni el resultado planeado tras una escritura "
+                  "interrumpida: cambió fuera de la herramienta.")
+
+
+# --------------------------------------------------------------------------
+# Reversión
+# --------------------------------------------------------------------------
+
+def revert_run(folder: Path, force: bool = False, dry_run: bool = False) -> list:
+    """Deshace una ejecución (formato 3) a partir de su plan y su diario."""
+    from choconostle import backup
+    run = Run(folder)
+    root = run.library_root()
+    if not dry_run:
+        recover(run.folder, root)
+    intents, done = run.outcome()
+    results = []
+    for record in run.plan_records():
+        if record["status"] != "change":
+            continue
+        entry = record["id"]
+        intent = intents.get(entry)
+        result = done.get(entry)
+        applied = result is not None and result["status"] == APPLIED
+        if result is None and intent is not None:
+            state, _problem = _resolve_intent(run, root, record, intent) if not dry_run else (None, None)
+            applied = state == APPLIED
+            if applied:
+                result = dict(_applied_extra(root, record, intent), status=APPLIED)
+        items = _items(record)
+        if intent is None or not applied:
+            results += [backup.RevertResult(item, backup.REVERT_ALREADY, "No se había aplicado.") for item in items]
+            continue
+        if record["type"] == "file":
+            item = dict(items[0], original_copy=intent["copy"], original_sha256=record["original_sha"],
+                        new_sha256=record["new_sha"], original_mtime=record.get("original_mtime"))
+            results.append(backup._revert_file(item, run.folder, root, force, dry_run))
+            continue
+        edit = dict(intent, id=entry, path=record["path"], status=APPLIED)
+        if result and result.get("new_sha"):
+            edit["new_sha"] = result["new_sha"]
+        results += backup._revert_edit(edit, items, run.folder, root, dry_run)
+    if not dry_run:
+        backup._write_revert_log(run.folder, root, results)
+    return results
+
+
+def _items(record: dict) -> list[dict]:
+    if record["type"] == "file":
+        return [{"id": record["item"], "kind": "file", "path": record["path"], "label": record["label"]}]
+    return [{"id": slot["item"], "kind": "embedded", "path": record["path"], "label": slot["label"],
+             "slot": slot["ref"], "original_value": slot["original"]}
+            for slot in record["slots"] if slot["status"] == "change"]
+
+
+def recover_run(folder: Path) -> list[tuple[str, str, str]]:
+    """Resuelve escrituras byte a byte interrumpidas y anota el resultado en el diario."""
+    run = Run(folder)
+    root = run.library_root()
+    results = recover(run.folder, root)
+    intents, done = run.outcome()
+    for name, status, message in results:
+        if not name.startswith("edit-"):
+            continue
+        entry = int(name.split("-")[1])
+        if entry in done:
+            continue
+        if status == "complete":
+            run.event({"event": "done", "id": entry, "status": APPLIED, "error": None,
+                       "note": "completada según el diario de escritura"})
+        elif status in ("restored", "untouched"):
+            run.event({"event": "done", "id": entry, "status": FAILED, "error": f"interrumpida: {message}"})
+    return results
+
+
+# --------------------------------------------------------------------------
+# Limpieza de respaldos
+# --------------------------------------------------------------------------
+
+@dataclass
+class BackupInfo:
+    folder: Path
+    created: datetime | None
+    kind: str
+    """"v3", "v2" o "v1"."""
+    state: str
+    keep_reason: str | None = None
+    """Motivo para no borrarlo nunca (incompleto, reanudable, escrituras pendientes)."""
+    size: int = 0
+
+
+def list_backups(root: Path) -> list[BackupInfo]:
+    base = Path(root) / BACKUP_DIR_NAME
+    if not base.is_dir():
+        return []
+    found = []
+    for folder in sorted(base.iterdir()):
+        if not folder.is_dir():
+            continue
+        info = _backup_info(folder)
+        info.size = sum(p.stat().st_size for p in folder.rglob("*") if p.is_file())
+        found.append(info)
+    return found
+
+
+def _backup_info(folder: Path) -> BackupInfo:
+    pending = Journal(folder).pending()
+    if (folder / STATE_NAME).is_file():
+        try:
+            run = Run(folder)
+        except (ValueError, json.JSONDecodeError) as exc:
+            return BackupInfo(folder, None, "v3", "dañado", f"estado ilegible ({exc})")
+        created = _parse_date(run.state.get("created_at"))
+        phase = run.phase
+        info = BackupInfo(folder, created, "v3", STATE_NAMES.get(phase, phase))
+        intents, done = run.outcome()
+        if pending:
+            info.keep_reason = "tiene escrituras interrumpidas sin resolver (usa recover)"
+        elif phase in (STATE_APPLYING, STATE_INTERRUPTED):
+            info.keep_reason = "ejecución incompleta y reanudable (--resume)"
+        elif phase == STATE_PLANNED and run.state.get("totals", {}).get("entries"):
+            info.keep_reason = "planificada sin aplicar (reanudable con --resume)"
+        elif set(intents) - set(done):
+            info.keep_reason = "hay escrituras sin confirmar en el diario"
+        return info
+    manifest_path = folder / "manifiesto.json"
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            return BackupInfo(folder, None, "v1/v2", "dañado", f"manifiesto ilegible ({exc})")
+        kind = f"v{manifest.get('manifest_version', 1)}"
+        info = BackupInfo(folder, _parse_date(manifest.get("created_at")), kind, "completada")
+        if pending:
+            info.keep_reason = "tiene escrituras interrumpidas sin resolver (usa recover)"
+        elif any(item.get("status") == "pending" for item in manifest.get("items", [])):
+            info.keep_reason = "hay letras sin confirmar en el manifiesto"
+        return info
+    return BackupInfo(folder, None, "desconocido", "desconocido",
+                      "no es una carpeta de respaldo reconocida")
+
+
+def _parse_date(value: str | None) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value) if value else None
+    except ValueError:
+        return None
+
+
+def clean_backups(root: Path, older_than_days: int, apply: bool = False,
+                  now: datetime | None = None) -> tuple[list[BackupInfo], list[BackupInfo]]:
+    """
+    (a borrar, a conservar). Solo borra con apply=True y nunca una
+    ejecución incompleta, reanudable o con escrituras pendientes.
+    """
+    now = now or datetime.now()
+    remove, keep = [], []
+    for info in list_backups(root):
+        if info.keep_reason:
+            keep.append(info)
+        elif info.created is None:
+            info.keep_reason = "fecha desconocida"
+            keep.append(info)
+        elif (now - info.created).days >= older_than_days:
+            remove.append(info)
+        else:
+            info.keep_reason = f"tiene {(now - info.created).days} días"
+            keep.append(info)
+    if apply:
+        for info in remove:
+            shutil.rmtree(info.folder)
+    return remove, keep
+
