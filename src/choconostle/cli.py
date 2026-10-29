@@ -38,7 +38,7 @@ from choconostle.normalizer import (
     ENCODING_KEEP, MODE_STANDARDIZE, MODE_STRIP, OFFSET_FIRST, OFFSET_LAST, OFFSET_SKIP, OFFSET_SUM,
     LyricsNormalizer, PendingWritesError, pending_sessions,
 )
-from choconostle.rawtags.writer import VERIFY_FULL, VERIFY_QUICK
+from choconostle.rawtags.writer import VERIFY_AUTO, VERIFY_FULL, VERIFY_QUICK
 from choconostle.report import (
     build_report, print_copyable, print_report, print_revert, print_run_report, write_json,
 )
@@ -60,6 +60,7 @@ class GroupBy(str, Enum):
 
 
 class Verify(str, Enum):
+    auto = VERIFY_AUTO
     full = VERIFY_FULL
     quick = VERIFY_QUICK
 
@@ -195,8 +196,9 @@ def normalize_lyrics(
     diff: bool = typer.Option(False, "--diff", help="Muestra las diferencias línea por línea."),
     limit: Optional[int] = typer.Option(
         None, "--limit", "-l",
-        help="Máximo de canciones por lista en pantalla (0 = sin límite). "
-             "Por defecto 20; sin límite con --diff o --apply (registro.txt siempre tiene la lista completa).",
+        help="Máximo de canciones por lista en pantalla (0 = sin límite). Por defecto 20; todas con --diff; "
+             "con --apply todas hasta 50 entradas y, si hay más, solo el resumen y los fallos "
+             "(registro.txt siempre tiene la lista completa).",
     ),
     include_hidden: bool = typer.Option(
         False, "--include-hidden",
@@ -209,8 +211,9 @@ def normalize_lyrics(
              "Usa las opciones guardadas y solo sigue si el diario, el respaldo y los archivos son coherentes.",
     ),
     verify: Verify = typer.Option(
-        Verify.full, "--verify",
-        help="Verificación tras escribir en archivos de audio: full (hash de todo el audio, antes y después) "
+        Verify.auto, "--verify",
+        help="Verificación tras escribir en archivos de audio: auto (por defecto: quick si el audio no se "
+             "escribe, full si se reescribe el archivo), full (hash de todo el audio, antes y después) "
              "o quick (etiquetas byte a byte, tamaño y el primer y último MB del audio).",
     ),
 ) -> None:
@@ -223,7 +226,7 @@ def normalize_lyrics(
     if not path.is_dir():
         print_copyable(error_console, f"No es una carpeta: {path}", "red")
         raise typer.Exit(code=2)
-    show_limit = (0 if diff or apply or resume else 20) if limit is None else limit
+    show_limit = limit  # None: el reporte decide (20; todo con --diff; resumen con --apply y más de 50)
     progress = _RunProgress(error_console, enabled=not no_progress and error_console.is_terminal)
 
     if resume is not None:
@@ -306,8 +309,10 @@ def _option_lines(options: dict) -> list[str]:
         lines.append("Letras casi vacías: se omiten")
     if options.get("allow_full_rewrite"):
         lines.append("Reescritura completa de archivos de audio: permitida")
-    if options.get("verify") == "quick":
-        lines.append("Verificación tras escribir: rápida (etiquetas, tamaño, primer y último MB)")
+    verify = options.get("verify", VERIFY_AUTO)
+    lines.append({VERIFY_AUTO: "Verificación tras escribir: automática (rápida en su sitio, completa al reescribir)",
+                  VERIFY_FULL: "Verificación tras escribir: completa (hash de todo el audio)",
+                  VERIFY_QUICK: "Verificación tras escribir: rápida (etiquetas, tamaño, primer y último MB)"}[verify])
     return lines
 
 
@@ -362,7 +367,7 @@ def _resume(path, folder, console, error_console, progress, show_limit, diff) ->
     try:
         progress.start_apply(execution.state["totals"]["entries"], completed=len(done))
         summary = runs.apply_run(execution, normalizer, path, progress, resume=True,
-                                 verify=options.get("verify", "full"))
+                                 verify=options.get("verify", VERIFY_AUTO))
     except runs.InsufficientSpace as exc:
         print_copyable(error_console, str(exc), "red")
         raise typer.Exit(code=2)

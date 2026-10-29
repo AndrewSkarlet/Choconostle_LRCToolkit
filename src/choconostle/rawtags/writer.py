@@ -40,6 +40,8 @@ from choconostle.utils import long_path
 JOURNAL_DIR = "pendiente"
 VERIFY_FULL = "full"
 """Se calcula el hash de todo el archivo fuera de la región, antes y después."""
+VERIFY_AUTO = "auto"
+"""quick si el audio no se escribe (edición en su sitio o al final), full si se reescribe el archivo."""
 VERIFY_QUICK = "quick"
 """Del resto del archivo solo se comparan el tamaño, el primer y el último MB."""
 _SAMPLE = 1 << 20
@@ -129,6 +131,13 @@ def _outside_sample(path: Path, start: int, length: int) -> str:
     digest.update(read_range(0, min(_SAMPLE, total)))
     digest.update(read_range(max(0, total - _SAMPLE), min(_SAMPLE, total)))
     return digest.hexdigest()
+
+
+def effective_verify(verify: str, mode: str) -> str:
+    """Verificación que corresponde a una edición: auto elige según si se reescribe el archivo."""
+    if verify == VERIFY_AUTO:
+        return VERIFY_FULL if mode == MODE_FULL else VERIFY_QUICK
+    return verify
 
 
 def file_signature(path: Path) -> tuple[int, int]:

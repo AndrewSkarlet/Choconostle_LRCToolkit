@@ -165,9 +165,9 @@ Mismas reglas de cabeceras y caracteres invisibles. Se conservan los saltos de l
 | `--allow-full-rewrite` | Permite reescribir el archivo de audio completo cuando la letra no cabe en el relleno (y siempre en Ogg/Opus). Por defecto se omiten. |
 | `--only CARPETA_O_ÁLBUM` | Limita a una carpeta (ruta absoluta o relativa a la biblioteca) o a un álbum (nombre según las etiquetas). Se puede repetir. |
 | `--diff` | Muestra las diferencias línea por línea. Los caracteres invisibles se ven como `⟨U+200B⟩`. Con `--diff` se muestra la lista completa. |
-| `--limit N` | Máximo de canciones por lista en pantalla (0 = todas). Por defecto 20 en la simulación; todas con `--diff` o `--apply`. Si se corta, se indica cuántas faltan. `registro.txt` siempre tiene la lista completa. |
+| `--limit N` | Máximo de canciones por lista en pantalla (0 = todas). Por defecto: 20 en la simulación; todas con `--diff`; con `--apply`, todas hasta 50 entradas y, si hay más, solo el resumen, los fallos y la ruta de `registro.txt`. Si se corta, se indica cuántas faltan. `registro.txt` siempre tiene la lista completa. |
 | `--resume CARPETA` | Continúa una ejecución detenida (ver «Bibliotecas grandes»). |
-| `--verify full\|quick` | Verificación tras escribir en archivos de audio (ver «Bibliotecas grandes»). Por defecto `full`. |
+| `--verify auto\|full\|quick` | Verificación tras escribir en archivos de audio (ver «Bibliotecas grandes»). Por defecto `auto`. |
 | `--no-progress` | No muestra la barra de progreso. |
 
 Con `--encoding` distinto de `keep`, un archivo se convierte **solo si todos sus caracteres caben** en la codificación de destino; si no, se omite y se lista con los caracteres que faltan (nunca se sustituyen por `?`). Tampoco se convierte un archivo cuya codificación de origen no se pueda confirmar. `--encoding` no cambia los saltos de línea. Para eso y para indicar la codificación de origen está `convert-lyrics`.
@@ -245,7 +245,8 @@ Solo cuentan como aplicados los archivos confirmados en el diario. Si la unidad 
 - cada archivo que quedó a medias sea exactamente el original o exactamente el resultado planeado.
 
 **`--verify`** decide qué se comprueba después de escribir en un archivo de audio:
-- `full` (por defecto): el hash de todo el audio, antes y después.
+- `auto` (por defecto): `quick` cuando la edición es en su sitio o al final del archivo (el audio no se escribe) y `full` cuando hay reescritura completa (el audio se copia).
+- `full`: el hash de todo el audio, antes y después.
 - `quick`: las etiquetas byte a byte, el tamaño y el primer y el último MB del audio.
 
 En ambos casos la región de etiquetas se relee y se verifica completa.

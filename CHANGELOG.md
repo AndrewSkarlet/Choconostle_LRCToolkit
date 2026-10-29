@@ -5,7 +5,6 @@
 ### Pendiente
 - Etapa 4 (`convert-lyrics`): opción de desempate de codificación, p. ej. `--prefer-encoding cp1252`. Serviría cuando charset-normalizer devuelve candidatos empatados de familias distintas (como cp1250 y cp1252 en español) y hoy el archivo se considera ambiguo.
 - Etapa 6: medir memoria y tiempo con bibliotecas sintéticas de tamaño creciente. Sigue creciendo con la biblioteca la tabla de resultados por entrada que se arma al reanudar, revertir y mostrar el reporte (un diccionario de identificadores).
-- Decidir si `--verify quick` debe ser el valor predeterminado en tarjetas SD (ver la medición en el README).
 
 ### Etapa 3: bibliotecas grandes, reanudación y limpieza
 
@@ -45,6 +44,10 @@
   - con la desconexión en una escritura de la biblioteca, de la copia de respaldo, del diario (`intent` y `done`) y del estado;
   - con EIO, WinError 1167 y WinError 3.
 - `revert`: si no encuentra el respaldo, nombra `estado.json` (no `manifiesto.json`) y sugiere comprobar que la ruta esté en una sola línea. Con `--latest` acepta la carpeta de la biblioteca (o `ChoconostleLRCTool_back`) y usa el respaldo más reciente.
+
+#### Pendientes cerrados de la etapa 3
+- `--verify auto` (por defecto): `quick` para ediciones en su sitio o al final (el audio no se escribe) y `full` para reescrituras completas. `--verify full|quick` fuerza uno u otro.
+- `--apply` con más de 50 entradas: la consola muestra el resumen, las entradas que fallaron o quedaron sin aplicar y la ruta de `registro.txt`, que siempre tiene la lista completa. `--limit 0` muestra todo.
 
 #### Incompatibilidades
 - Las ejecuciones nuevas usan el formato 3 (`estado.json`, `plan.jsonl`, `diario.jsonl`) en lugar de `manifiesto.json`. `revert` sigue leyendo los formatos 1 y 2.

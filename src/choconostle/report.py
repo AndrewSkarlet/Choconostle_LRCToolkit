@@ -497,10 +497,13 @@ def print_report(report: dict, console: Console | None = None, limit: int = 20) 
 # normalize-lyrics y revert
 # --------------------------------------------------------------------------
 
+APPLY_LIST_MAX = 50
+
+
 def print_run_report(
     run,
     console: Console | None = None,
-    limit: int = 20,
+    limit: int | None = None,
     show_diff: bool = False,
     applied: bool = False,
     summary=None,
@@ -515,6 +518,17 @@ def print_run_report(
 
     console = console or Console()
     totals = run.state["totals"]
+    # Sin --limit: todo con --diff; con --apply, todo hasta APPLY_LIST_MAX entradas y
+    # si hay más, solo el resumen (la lista completa queda en registro.txt).
+    summary_only = False
+    if limit is None:
+        if show_diff:
+            limit = 0
+        elif applied:
+            summary_only = totals["entries"] > APPLY_LIST_MAX
+            limit = 20 if summary_only else 0
+        else:
+            limit = 20
     statuses = totals["statuses"]
     root = run.library_root()
     _intents, done = run.outcome() if applied else ({}, {})
@@ -575,12 +589,23 @@ def print_run_report(
                 yield slot, f"{record['path']} [{slot['label']}]"
 
     # Cambios, agrupados por canción.
+    if changes and summary_only:
+        _section(console, "Cambios")
+        console.print(f"{plural(totals['entries'], 'entrada')} en "
+                      f"{plural(totals['songs_changed'], 'canción', 'canciones')}: con más de {APPLY_LIST_MAX} "
+                      "solo se listan aquí las que fallaron o quedaron sin aplicar. La lista completa está en:",
+                      markup=False)
+        print_copyable(console, str(run.folder / "registro.txt"))
+        console.print("Usa --limit 0 para verla aquí.", markup=False)
     if changes:
-        _section(console, "Cambios" if applied else "Cambios que se aplicarían")
+        if not summary_only:
+            _section(console, "Cambios" if applied else "Cambios que se aplicarían")
         shown_songs = total_songs = 0
         current = None
         for record in run.plan_records():
             if record["status"] != "change":
+                continue
+            if summary_only and done.get(record["id"], {}).get("status") == "applied":
                 continue
             song = record.get("track") or record["path"]
             if song != current:
@@ -620,7 +645,8 @@ def print_run_report(
                     for line in entry.get("diff", []):
                         style = "green" if line.startswith("+") else "red" if line.startswith("-") else "dim"
                         console.print(Text("     " + line, style=style))
-        _more(console, total_songs - shown_songs, total_songs, "canciones")
+        if not summary_only:
+            _more(console, total_songs - shown_songs, total_songs, "canciones")
 
     def listing(title: str, select, style: str | None = None, text=lambda item: item["message"]) -> None:
         count = sum(1 for record in run.plan_records() for item, _where in lyric_items(record) if select(item))

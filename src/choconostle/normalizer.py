@@ -823,7 +823,7 @@ class LyricsNormalizer:
         """Recalcula el cambio de un archivo de letra (al aplicar un plan guardado)."""
         return self._plan_file(Path(path), None, [tuple(pair) for pair in headers])
 
-    def apply(self, changes: list[LyricsChange], root: Path, verify: str = "full"):
+    def apply(self, changes: list[LyricsChange], root: Path, verify: str = "auto"):
         """
         Aplica los cambios planeados (status == STATUS_CHANGE) creando una
         ejecución en disco (run.py): plan, diario y respaldo. Retorna la

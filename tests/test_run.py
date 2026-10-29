@@ -601,16 +601,55 @@ def test_clean_backups_never_touches_incomplete_runs(biblioteca, monkeypatch):
 # Salida de la CLI
 # --------------------------------------------------------------------------
 
-def test_apply_lists_every_song_and_nothing_to_apply(biblioteca):
-    args = ["normalize-lyrics", str(biblioteca), "--strip-headers", "--apply", "--no-progress"]
+def test_apply_output_list_rules(casos, tmp_path):
+    """
+    --apply: hasta 50 entradas se listan todas; con más, solo el resumen y
+    los fallos, y la ruta de registro.txt; --limit 0 muestra todo.
+    """
+    def library(name):
+        root = tmp_path / name
+        shutil.copytree(casos, root)
+        return root
+
+    big = library("grande")  # 89 entradas
+    args = ["normalize-lyrics", str(big), "--strip-headers", "--apply", "--no-progress"]
     result = runner.invoke(app, args, env={"COLUMNS": "200"})
     assert result.exit_code == 0, result.output
-    assert "... y" not in result.output
-    assert "01_codificaciones/16 ruso utf8.flac" in result.output  # mucho más allá de las primeras 20
+    folder = next((big / BACKUP_DIR_NAME).iterdir())
+    assert "con más de 50 solo se listan" in result.output
+    assert str(folder / runs.LOG_NAME) in result.output.splitlines()
+    assert "01_codificaciones/16 ruso utf8.flac" not in result.output
+    log = (folder / runs.LOG_NAME).read_text(encoding="utf-8")
+    assert "01_codificaciones/16 ruso utf8.lrc" in log  # el registro tiene todo
+
     result = runner.invoke(app, args, env={"COLUMNS": "200"})
     assert "APLICADO: no había nada que aplicar" in result.output
     assert "SIMULACIÓN" not in result.output
-    assert len(list((biblioteca / BACKUP_DIR_NAME).iterdir())) == 1  # no se creó otro respaldo
+    assert len(list((big / BACKUP_DIR_NAME).iterdir())) == 1  # no se creó otro respaldo
+
+    full = library("completa")
+    result = runner.invoke(app, ["normalize-lyrics", str(full), "--strip-headers", "--apply", "--no-progress",
+                                 "--limit", "0"], env={"COLUMNS": "200"})
+    assert "01_codificaciones/16 ruso utf8.flac" in result.output and "... y" not in result.output
+
+    small = library("chica")  # 03_cabeceras: menos de 50 entradas
+    result = runner.invoke(app, ["normalize-lyrics", str(small), "--strip-headers", "--apply", "--no-progress",
+                                 "--only", "03_cabeceras"], env={"COLUMNS": "200"})
+    assert "03_cabeceras/18 valor con corchetes y dos puntos.flac" in result.output
+    assert "solo se listan" not in result.output
+
+
+def test_verify_auto_picks_quick_in_place_and_full_for_rewrites(biblioteca):
+    normalizer, execution = start(biblioteca)
+    runs.apply_run(execution, normalizer, biblioteca)  # verify="auto" por defecto
+    intents, _done = execution.outcome()
+    by_mode = {}
+    for intent in intents.values():
+        if "mode" in intent:
+            by_mode.setdefault(intent["mode"], set()).add(intent["verify"])
+    assert by_mode["inplace"] == {"quick"}
+    assert by_mode["full"] == {"full"}  # Opus/Ogg: reescritura completa
+    assert by_mode["tail"] == {"quick"}
 
 
 def test_repeated_lyric_frames_are_kept_apart(tmp_path):

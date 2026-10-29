@@ -49,8 +49,8 @@ from choconostle.embedded import open_editor
 from choconostle.rawtags import MODE_FULL, Unsupported, apply_patches, patches_to_json, sha256
 from choconostle.rawtags.ogg import OggEditor
 from choconostle.rawtags.writer import (
-    TEMP_SUFFIX, VERIFY_FULL, ChangedError, Journal, RestoreError, WriteError, file_sha256,
-    file_signature, read_at, recover, rewrite_with, write_edit,
+    TEMP_SUFFIX, VERIFY_AUTO, ChangedError, Journal, RestoreError, WriteError, file_sha256,
+    effective_verify, file_signature, read_at, recover, rewrite_with, write_edit,
 )
 from choconostle.scanner import iter_folders
 from choconostle.textio import diff_lines
@@ -614,7 +614,7 @@ class ApplySummary:
 
 
 def apply_run(run: Run, normalizer, root: Path, progress=None, resume: bool = False,
-              verify: str = VERIFY_FULL) -> ApplySummary:
+              verify: str = VERIFY_AUTO) -> ApplySummary:
     """Aplica las entradas del plan que faltan. Se puede reanudar."""
     root = Path(root)
     summary = ApplySummary()
@@ -784,6 +784,7 @@ def _apply_audio(run: Run, root: Path, record: dict, journal: Journal, verify: s
         return _finish(run, record, FAILED, f"no se pudo abrir: {exc}")
 
     is_ogg = isinstance(editor, OggEditor)
+    verify = effective_verify(verify, edit.mode)
     intent = {"event": "intent", "id": record["id"], "writer": "mutagen-ogg" if is_ogg else "raw",
               "format": editor.tag_format, "mode": edit.mode, "signature": plan["signature"],
               "verify": verify}
