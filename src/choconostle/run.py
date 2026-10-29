@@ -37,6 +37,7 @@ import errno
 import json
 import os
 import shutil
+import stat
 import tempfile
 from collections import Counter
 from dataclasses import dataclass, field
@@ -140,14 +141,21 @@ def write_json_atomic(path: Path, data: dict) -> None:
 
 
 def iter_jsonl(path: Path):
-    """Líneas JSON de un archivo. Una última línea a medias (corte al escribir) se ignora."""
+    """
+    Líneas JSON de un archivo. Una línea a medias (corte de luz o unidad
+    desconectada mientras se escribía) se ignora: lo que no llegó entero
+    al disco no cuenta como confirmado.
+    """
     if not path.exists():
         return
     with open(long_path(path), "r", encoding="utf-8") as handle:
         for line in handle:
             if not line.endswith("\n"):
                 return
-            yield json.loads(line)
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                continue
 
 
 def _safe_name(name: str, limit: int = 80) -> str:
@@ -180,12 +188,15 @@ def reachable(root: Path, backups: bool = True) -> bool:
     sigue accesible. Si desaparece la letra de unidad o el punto de
     montaje de la tarjeta SD, es False.
     """
-    try:
-        if not os.path.isdir(long_path(root)):
+    # Con os.stat y no os.path.isdir: en Windows isdir es una función en C
+    # (nt._path_isdir) y se comporta distinto ante algunos errores; así el
+    # criterio es el mismo en Windows, Linux y Android.
+    def is_dir(path) -> bool:
+        try:
+            return stat.S_ISDIR(os.stat(long_path(path)).st_mode)
+        except (OSError, ValueError):
             return False
-        return not backups or os.path.isdir(long_path(Path(root) / BACKUP_DIR_NAME))
-    except (OSError, ValueError):
-        return False
+    return is_dir(root) and (not backups or is_dir(Path(root) / BACKUP_DIR_NAME))
 
 
 # --------------------------------------------------------------------------
@@ -263,9 +274,21 @@ class Run:
     # -- diario ----------------------------------------------------------------
 
     def event(self, data: dict) -> None:
-        """Agrega un evento al diario con fsync."""
-        with open(long_path(self.folder / DIARY_NAME), "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(data, ensure_ascii=False) + "\n")
+        """
+        Agrega un evento al diario con fsync. Si la última línea quedó a
+        medias (escritura cortada), se termina antes para que el evento
+        nuevo no se pegue a ella.
+        """
+        path = long_path(self.folder / DIARY_NAME)
+        with open(path, "a+b") as handle:
+            handle.seek(0, os.SEEK_END)
+            prefix = b""
+            if handle.tell():
+                handle.seek(-1, os.SEEK_END)
+                if handle.read(1) != b"\n":
+                    prefix = b"\n"
+                handle.seek(0, os.SEEK_END)
+            handle.write(prefix + (json.dumps(data, ensure_ascii=False) + "\n").encode("utf-8"))
             fsync_file(handle)
 
     def events(self):
@@ -596,14 +619,14 @@ def apply_run(run: Run, normalizer, root: Path, progress=None, resume: bool = Fa
     root = Path(root)
     summary = ApplySummary()
     check_space(run, root)
-    intents, done = run.outcome()
-    if not resume:
-        _log_header(run, root)
-    else:
-        run.log(["", f"=== Reanudado el {datetime.now().isoformat(timespec='seconds')} ==="])
-    run.save_state(state=STATE_APPLYING)
     journal = Journal(run.folder)
     try:
+        intents, done = run.outcome()
+        if not resume:
+            _log_header(run, root)
+        else:
+            run.log(["", f"=== Reanudado el {datetime.now().isoformat(timespec='seconds')} ==="])
+        run.save_state(state=STATE_APPLYING)
         for record in run.plan_records():
             if record["status"] != "change" or record["id"] in done:
                 continue
@@ -622,15 +645,17 @@ def apply_run(run: Run, normalizer, root: Path, progress=None, resume: bool = Fa
                 progress.applied(summary)
         run.save_state(state=STATE_COMPLETED)
         _log_footer(run, summary)
+    except OSError as exc:
+        # Error del respaldo (estado, plan, diario, registro), no de un archivo
+        # de la biblioteca: no se puede seguir anotando qué se hace.
+        stop = _infrastructure_stop(exc, root, run)
+        summary.stopped = str(stop)
+        summary.stop_kind = stop.kind
+        _mark_interrupted(run, root, stop)
     except StopRun as stop:
         summary.stopped = str(stop)
         summary.stop_kind = stop.kind
-        try:
-            run.save_state(state=STATE_INTERRUPTED, stop_reason=str(stop), stop_kind=stop.kind)
-            run.log(["", f"=== DETENIDO: {stop} ===",
-                     f"Para continuar: choconostle normalize-lyrics \"{root}\" --resume \"{run.folder}\""])
-        except OSError:
-            pass  # la unidad ya no está: el diario en disco dice qué terminó
+        _mark_interrupted(run, root, stop)
     except KeyboardInterrupt:
         try:
             run.save_state(state=STATE_INTERRUPTED, stop_reason="interrumpido por el usuario", stop_kind="user")
@@ -640,12 +665,46 @@ def apply_run(run: Run, normalizer, root: Path, progress=None, resume: bool = Fa
     return summary
 
 
+def _infrastructure_stop(exc: OSError, root: Path, run: Run) -> StopRun:
+    kind = fatal_kind(exc, root) or "device"
+    if kind == "space":
+        return StopRun("space", f"Sin espacio libre para escribir el respaldo ({exc}).")
+    return StopRun("device", f"No se pudo escribir en la carpeta de respaldo ({exc}); "
+                             "¿se desconectó la tarjeta SD?")
+
+
+def _mark_interrupted(run: Run, root: Path, stop: StopRun) -> None:
+    """
+    Anota la interrupción si se puede. Si la unidad ya no está, no pasa
+    nada: el diario en disco termina en el último evento confirmado y
+    --resume decide a partir de él.
+    """
+    try:
+        run.save_state(state=STATE_INTERRUPTED, stop_reason=str(stop), stop_kind=stop.kind)
+        run.log(["", f"=== DETENIDO: {stop} ===",
+                 f"Para continuar: choconostle normalize-lyrics \"{root}\" --resume \"{run.folder}\""])
+    except OSError:
+        pass
+
+
+def _diary(run: Run, root: Path, event: dict) -> None:
+    """Escribe un evento del diario; si no se puede, la ejecución se detiene (nunca sigue sin anotar)."""
+    try:
+        run.event(event)
+    except OSError as exc:
+        raise _infrastructure_stop(exc, root, run) from exc
+
+
 def _finish(run: Run, record: dict, status: str, error: str | None, extra: dict | None = None,
-            log_lines: list[str] | None = None) -> tuple[str, str | None]:
+            log_lines: list[str] | None = None, root: Path | None = None) -> tuple[str, str | None]:
+    root = root if root is not None else run.library_root()
     event = {"event": "done", "id": record["id"], "status": status, "error": error}
     event.update(extra or {})
-    run.event(event)
-    run.log(_log_block(record, status, error) + (log_lines or []))
+    _diary(run, root, event)
+    try:
+        run.log(_log_block(record, status, error) + (log_lines or []))
+    except OSError as exc:
+        raise _infrastructure_stop(exc, root, run) from exc
     checkpoint("done", record)
     return status, error
 
@@ -678,7 +737,7 @@ def _apply_file(run: Run, normalizer, root: Path, record: dict) -> tuple[str, st
             handle.write(current)
             fsync_file(handle)
         checkpoint("backup", record)
-        run.event({"event": "intent", "id": record["id"], "copy": copy, "original_sha": record["original_sha"],
+        _diary(run, root, {"event": "intent", "id": record["id"], "copy": copy, "original_sha": record["original_sha"],
                    "new_sha": record["new_sha"], "original_mtime": record.get("original_mtime")})
         checkpoint("intent", record)
         write_file_atomic(path, change.new_bytes)
@@ -745,7 +804,7 @@ def _apply_audio(run: Run, root: Path, record: dict, journal: Journal, verify: s
                 "size_after": plan["signature"][0] + edit.new_len - edit.old_len,
             })
         checkpoint("backup", record)
-        run.event(intent)
+        _diary(run, root, intent)
         checkpoint("intent", record)
         if is_ogg:
             result = rewrite_with(path, tuple(plan["signature"]), lambda tmp: OggEditor.modify(tmp, values),

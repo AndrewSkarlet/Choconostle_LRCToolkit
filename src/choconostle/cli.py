@@ -347,7 +347,12 @@ def _resume(path, folder, console, error_console, progress, show_limit, diff) ->
         raise typer.Exit(code=2)
     options = execution.state["options"]
     normalizer = LyricsNormalizer.from_options(options)
-    problems = runs.resume_check(execution, path, normalizer)
+    try:
+        problems = runs.resume_check(execution, path, normalizer)
+    except OSError as exc:
+        print_copyable(error_console, f"No se puede reanudar: la biblioteca o su respaldo no están accesibles ({exc}). "
+                                      "No se modificó nada; vuelve a intentarlo cuando la unidad esté conectada.", "red")
+        raise typer.Exit(code=3)
     if problems:
         error_console.print("No se puede reanudar con seguridad; no se modificó nada:", style="red")
         for problem in problems:

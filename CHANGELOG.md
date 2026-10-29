@@ -34,6 +34,16 @@
 - Si la unidad desaparece durante la planificación, la ejecución se detiene sin aplicar nada (código 3). Si desaparece antes del reporte final, se muestra un resumen con el comando para reanudar.
 - La prueba de desconexión ya no renombra la carpeta (en Windows falla con WinError 5): simula que toda operación sobre la biblioteca falla. Se prueba con EIO y con WinError 1167, cada código de Windows por separado, la desaparición de la letra de unidad, WinError 5 y la desconexión durante la planificación.
 - Las rutas y comandos para copiar se imprimen sin que Rich los parta en varias líneas.
+- Desconexión al escribir el diario, el registro, el estado o la copia de respaldo: antes, el error al anotar un fallo escapaba sin capturar (código 1). Ahora:
+  - toda escritura del diario pasa por `_diary()` y cualquier error de la carpeta de respaldo detiene la ejecución con código 3 y el comando `--resume`;
+  - si no se pudo escribir el `intent`, no se toca el archivo;
+  - si no se pudo escribir el `done`, `--resume` resuelve la entrada a partir del último `intent` confirmado.
+- `reachable()` usa `os.stat`: en Windows `os.path.isdir` es una función en C (`nt._path_isdir`) que no se comporta igual ante algunos errores.
+- El diario termina una línea cortada antes de añadir otra, y al leerlo se ignoran las líneas dañadas.
+- Pruebas de desconexión más estrictas:
+  - en modo «posix» y «windows» (este último reproduce en Linux que `os.path.isdir/exists` no pasan por `os.stat`);
+  - con la desconexión en una escritura de la biblioteca, de la copia de respaldo, del diario (`intent` y `done`) y del estado;
+  - con EIO, WinError 1167 y WinError 3.
 - `revert`: si no encuentra el respaldo, nombra `estado.json` (no `manifiesto.json`) y sugiere comprobar que la ruta esté en una sola línea. Con `--latest` acepta la carpeta de la biblioteca (o `ChoconostleLRCTool_back`) y usa el respaldo más reciente.
 
 #### Incompatibilidades

@@ -10,6 +10,7 @@ import errno
 import json
 import os
 import shutil
+import stat
 from collections import namedtuple
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -300,22 +301,50 @@ class Unplug:
     escritura número `after` sobre un archivo de la biblioteca (no del
     respaldo), toda operación sobre rutas de la biblioteca (abrir, stat,
     listar, escribir, reemplazar, borrar, espacio libre) falla con `error()`.
+
+    `on` elige qué escrituras cuentan para el momento de la desconexión:
+    "library" (archivos de letra o audio), "backup" (copias en originales/),
+    "diary" (diario.jsonl) o "state" (estado.json).
+
+    `paths` reproduce cómo se comportan os.path.isdir/exists/isfile en cada
+    sistema, para que la prueba dé lo mismo en Linux y en Windows:
+    - "posix": pasan por os.stat (como en Linux), así que también fallan.
+    - "windows": en Windows (Python 3.12+) son funciones en C (nt._path_isdir...)
+      que no pasan por os.stat: siguen viendo el sistema de archivos real.
     """
 
-    def __init__(self, monkeypatch, root: Path, after: int, error):
+    def __init__(self, monkeypatch, root: Path, after: int, error, paths: str = "posix", on: str = "library"):
         self.root = os.path.normcase(os.path.abspath(root))
-        self.backups = os.path.join(self.root, BACKUP_DIR_NAME)
+        # normcase también aquí: en Windows pasa a minúsculas y, si no, las
+        # escrituras del respaldo se contaban como de la biblioteca.
+        self.backups = os.path.normcase(os.path.join(self.root, BACKUP_DIR_NAME))
+        self.on = on
         self.after = after
         self.error = error
         self.writes = 0
         self.unplugged = False
         import builtins
         import io
+        real_stat = os.stat
         for module, name in [(builtins, "open"), (io, "open"), (os, "open"), (os, "stat"), (os, "lstat"),
                              (os, "scandir"), (os, "listdir"), (os, "replace"), (os, "rename"),
                              (os, "unlink"), (os, "remove"), (os, "utime"), (os, "mkdir"),
                              (shutil, "disk_usage")]:
             monkeypatch.setattr(module, name, self._wrap(getattr(module, name), name))
+        statter = (lambda path: os.stat(path)) if paths == "posix" else real_stat
+        for name, test in [("isdir", stat.S_ISDIR), ("isfile", stat.S_ISREG), ("exists", None),
+                           ("lexists", None)]:
+            monkeypatch.setattr(os.path, name, self._path_check(statter, test))
+
+    @staticmethod
+    def _path_check(statter, test):
+        def check(path):
+            try:
+                result = statter(path)
+            except (OSError, ValueError):
+                return False
+            return True if test is None else test(result.st_mode)
+        return check
 
     def _inside(self, path) -> bool:
         if isinstance(path, int):
@@ -339,8 +368,7 @@ class Unplug:
                     raise self.error()
                 mode = args[1] if len(args) > 1 and isinstance(args[1], str) else kwargs.get("mode", "r")
                 writing = name in ("open",) and isinstance(mode, str) and any(c in mode for c in "wax+")
-                library_file = not self._inside_backups(paths[0])
-                if writing and library_file:
+                if writing and self._counts(paths[0]):
                     self.writes += 1
                     if self.writes >= self.after:
                         self.unplugged = True
@@ -348,14 +376,26 @@ class Unplug:
             return real(*args, **kwargs)
         return wrapper
 
-    def _inside_backups(self, path) -> bool:
+    def _counts(self, path) -> bool:
         text = os.path.normcase(os.path.abspath(os.fspath(path)))
-        return text.startswith(self.backups + os.sep)
+        in_backups = text.startswith(self.backups + os.sep)
+        name = os.path.basename(text)
+        if self.on == "library":
+            return not in_backups
+        if self.on == "backup":
+            return in_backups and os.sep + "originales" + os.sep in text
+        if self.on == "diary":
+            return in_backups and name == runs.DIARY_NAME
+        return in_backups and name.startswith(runs.STATE_NAME)
 
 
+PATH_MODES = ["posix", "windows"]
+
+
+@pytest.mark.parametrize("paths", PATH_MODES)
 @pytest.mark.parametrize("error", [eio, lambda: win_error(1167)], ids=["EIO", "WinError1167"])
-def test_device_disconnected_then_resume(biblioteca, reference, original, monkeypatch, error):
-    unplug = Unplug(monkeypatch, biblioteca, after=5, error=error)
+def test_device_disconnected_then_resume(biblioteca, reference, original, monkeypatch, error, paths):
+    unplug = Unplug(monkeypatch, biblioteca, after=5, error=error, paths=paths)
     args = ["normalize-lyrics", str(biblioteca), "--strip-headers", "--apply", "--allow-full-rewrite",
             "--no-progress", *sum((["--only", o] for o in ONLY), [])]
     result = runner.invoke(app, args, env={"COLUMNS": "200"})
@@ -374,10 +414,39 @@ def test_device_disconnected_then_resume(biblioteca, reference, original, monkey
     assert files(biblioteca) == original
 
 
-def test_drive_letter_disappears(biblioteca, reference, monkeypatch):
+@pytest.mark.parametrize("paths", PATH_MODES)
+@pytest.mark.parametrize("on,after", [("backup", 3), ("diary", 7), ("diary", 8), ("state", 3), ("state", 4)])
+@pytest.mark.parametrize("error", [eio, lambda: win_error(1167), lambda: win_error(3)],
+                         ids=["EIO", "WinError1167", "WinError3"])
+def test_disconnection_while_writing_backup_or_diary(biblioteca, reference, original, monkeypatch,
+                                                     error, on, after, paths):
+    """
+    La unidad se va justo al escribir la copia de respaldo, el diario o el
+    estado (no un archivo de la biblioteca). La ejecución debe terminar con
+    código 3, indicar --resume, y --resume debe poder continuar.
+    """
+    unplug = Unplug(monkeypatch, biblioteca, after=after, error=error, paths=paths, on=on)
+    args = ["normalize-lyrics", str(biblioteca), "--strip-headers", "--apply", "--allow-full-rewrite",
+            "--no-progress", *sum((["--only", o] for o in ONLY), [])]
+    result = runner.invoke(app, args, env={"COLUMNS": "200"})
+    assert unplug.unplugged
+    assert result.exception is None or isinstance(result.exception, SystemExit), repr(result.exception)
+    assert result.exit_code == 3, result.output
+    assert "--resume" in result.output
+    monkeypatch.undo()  # se vuelve a conectar
+    folder = next((biblioteca / BACKUP_DIR_NAME).iterdir())
+    result = runner.invoke(app, ["normalize-lyrics", str(biblioteca), "--resume", str(folder), "--no-progress"])
+    assert result.exit_code == 0, result.output
+    assert files(biblioteca) == reference
+    backup.revert(folder)
+    assert files(biblioteca) == original
+
+
+@pytest.mark.parametrize("paths", PATH_MODES)
+def test_drive_letter_disappears(biblioteca, reference, monkeypatch, paths):
     """La letra de unidad (o el punto de montaje) desaparece: "no se encuentra la ruta"."""
     normalizer, execution = start(biblioteca)
-    Unplug(monkeypatch, biblioteca, after=3, error=lambda: win_error(3))  # ERROR_PATH_NOT_FOUND
+    Unplug(monkeypatch, biblioteca, after=3, error=lambda: win_error(3), paths=paths)  # ERROR_PATH_NOT_FOUND
     summary = runs.apply_run(execution, normalizer, biblioteca)
     assert summary.stop_kind == "device"
     monkeypatch.undo()
@@ -655,3 +724,20 @@ def test_revert_library_with_latest(biblioteca, original):
     # También desde la carpeta de respaldos.
     result = runner.invoke(app, ["revert", str(biblioteca / BACKUP_DIR_NAME), "--latest", "--dry-run"])
     assert result.exit_code == 0 and "Ya estaban como el original" in result.output
+
+
+def test_diary_survives_a_torn_line(tmp_path):
+    """Una línea del diario cortada por la desconexión no se pega al evento siguiente."""
+    execution = runs.Run.create(tmp_path, "normalize-lyrics", {})
+    execution.event({"event": "intent", "id": 1})
+    with open(execution.folder / runs.DIARY_NAME, "a", encoding="utf-8") as handle:
+        handle.write('{"event": "done", "id": 1, "sta')  # corte a mitad de línea
+    assert [e["event"] for e in execution.events()] == ["intent"]  # lo cortado no cuenta
+    execution.event({"event": "done", "id": 1, "status": "applied"})
+    intents, done = execution.outcome()
+    assert list(intents) == [1] and done[1]["status"] == "applied"
+    # Una línea dañada en medio (p. ej. bytes basura) se ignora sin romper la lectura.
+    with open(execution.folder / runs.DIARY_NAME, "a", encoding="utf-8") as handle:
+        handle.write("\x00\x00basura\n")
+    execution.event({"event": "intent", "id": 2})
+    assert [e["id"] for e in execution.events()] == [1, 1, 2]
