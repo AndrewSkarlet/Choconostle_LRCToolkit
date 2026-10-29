@@ -216,7 +216,7 @@ def write_edit(path: Path, editor, edit, journal: Journal, name: str,
     if read_at(path, editor.start, len(old)) != old:
         raise ChangedError("las etiquetas cambiaron desde que se planearon los cambios")
     new = apply_patches(old, edit.patches)
-    problems = editor.verify(new, edit.expected)
+    problems = editor.verify(new, edit.expected, edit.encodings)
     if problems:
         raise WriteError("la edición calculada no es segura: " + "; ".join(problems))
 
@@ -264,7 +264,7 @@ def _check(path: Path, start: int, new: bytes, before: str, editor, edit, verify
     if written != new:
         problems.append("la región escrita no coincide")
     else:
-        problems += editor.verify(written, edit.expected)
+        problems += editor.verify(written, edit.expected, edit.encodings)
     if outside_hash(path, start, len(new), verify) != before:
         problems.append("cambió el audio o el resto del archivo")
     return problems

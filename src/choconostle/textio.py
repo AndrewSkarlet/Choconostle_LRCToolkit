@@ -171,12 +171,17 @@ class Detection:
     """Candidatos igual de probables que decodifican a textos distintos."""
     invalid_utf8: int = 0
     """Si > 0: es casi todo UTF-8, con esta cantidad de secuencias inválidas."""
+    tie_broken: bool = False
+    """El empate entre `candidates` se resolvió con --prefer-encoding."""
 
     def describe(self) -> str:
         if self.invalid_utf8:
             return f"UTF-8 con {plural_bytes(self.invalid_utf8)} inválidos"
         if self.encoding is None:
             return "no se pudo detectar la codificación"
+        if self.confident and self.tie_broken:
+            names = ", ".join(encoding_label(name) for name in self.candidates[:3])
+            return f"{encoding_label(self.encoding)}, desempatada con --prefer-encoding (empate entre {names})"
         if self.confident:
             return f"detectada {encoding_label(self.encoding)}"
         names = [encoding_label(name) for name in self.candidates[:3]] or [encoding_label(self.encoding)]
@@ -201,7 +206,7 @@ def _mostly_utf8(data: bytes) -> int:
     return 0
 
 
-def detect_encoding(data: bytes) -> Detection:
+def detect_encoding(data: bytes, prefer: str | None = None) -> Detection:
     """
     Detecta la codificación de bytes que no son UTF-8 válido ni tienen BOM.
 
@@ -216,10 +221,10 @@ def detect_encoding(data: bytes) -> Detection:
         from charset_normalizer import from_bytes
     except ImportError:  # pragma: no cover - dependencia declarada
         return Detection(None, False)
-    return judge_candidates(data, [(match.encoding, match.chaos) for match in from_bytes(data)])
+    return judge_candidates(data, [(match.encoding, match.chaos) for match in from_bytes(data)], prefer)
 
 
-def judge_candidates(data: bytes, candidates: list[tuple[str, float]]) -> Detection:
+def judge_candidates(data: bytes, candidates: list[tuple[str, float]], prefer: str | None = None) -> Detection:
     """
     Decide si la detección es fiable a partir de los candidatos
     [(códec, caos)], en el orden de preferencia de charset-normalizer.
@@ -228,6 +233,10 @@ def judge_candidates(data: bytes, candidates: list[tuple[str, float]]) -> Detect
     decodifican y recodifican los bytes sin cambios), todos dan el mismo
     texto o todos son de la misma familia compatible. Si no, es ambigua y
     la vista del texto será aproximada.
+
+    `prefer` (--prefer-encoding) solo desempata: si es uno de los
+    candidatos empatados (o de su misma familia) y decodifica los bytes sin
+    pérdida, se usa. Nunca impone una codificación que no esté empatada.
     """
     usable = []
     for encoding, chaos in candidates:
@@ -249,7 +258,11 @@ def judge_candidates(data: bytes, candidates: list[tuple[str, float]]) -> Detect
     if len(by_text) > 1:
         families = {encoding_family(encoding) for encoding, _chaos, _text in tied}
         if len(families) != 1 or None in families:
-            return Detection(chosen, False, [names[0] for names in by_text.values()])
+            candidates_found = [names[0] for names in by_text.values()]
+            preferred = _preferred(data, prefer, [encoding for encoding, _chaos, _text in tied])
+            if preferred is not None:
+                return Detection(preferred, best_chaos <= _MAX_CHAOS, candidates_found, tie_broken=True)
+            return Detection(chosen, False, candidates_found)
         chosen = min((encoding for encoding, _chaos, _text in tied),
                      key=lambda name: _FAMILY_OF[_codec_name(name)][1])
     return Detection(chosen, best_chaos <= _MAX_CHAOS)
@@ -338,7 +351,24 @@ def _utf16_without_bom(data: bytes) -> str | None:
     return None
 
 
-def decode_lyrics(data: bytes) -> DecodedLyrics:
+def _preferred(data: bytes, prefer: str | None, tied: list[str]) -> str | None:
+    """Códec para desempatar con --prefer-encoding, o None si no está entre los empatados."""
+    if not prefer:
+        return None
+    wanted = _codec_name(prefer)
+    family = encoding_family(prefer)
+    for encoding in tied:
+        if _codec_name(encoding) == wanted or (family is not None and encoding_family(encoding) == family):
+            for option in (prefer, encoding):
+                try:
+                    if data.decode(option).encode(option) == data:
+                        return _codec_name(option)
+                except (UnicodeError, LookupError):
+                    continue
+    return None
+
+
+def decode_lyrics(data: bytes, prefer: str | None = None) -> DecodedLyrics:
     """
     Decodifica un archivo de letra de forma reversible.
 
@@ -368,7 +398,7 @@ def decode_lyrics(data: bytes) -> DecodedLyrics:
     except UnicodeDecodeError:
         pass
     return DecodedLyrics(data.decode("latin-1"), "latin-1", b"", exact=False,
-                         detection=detect_encoding(data))
+                         detection=detect_encoding(data, prefer))
 
 
 # --------------------------------------------------------------------------
@@ -446,6 +476,128 @@ def encode_text(text: str, target: TargetEncoding) -> bytes:
             bad.setdefault(char)
             count += 1
     raise UnencodableError(target, list(bad), count)
+
+
+# --------------------------------------------------------------------------
+# Saltos de línea (convert-lyrics --eol)
+# --------------------------------------------------------------------------
+
+EOL_LF = "lf"
+EOL_CRLF = "crlf"
+EOL_KEEP = "keep"
+_EOL_VALUES = {EOL_LF: "\n", EOL_CRLF: "\r\n"}
+
+
+def convert_eol(text: str, eol: str) -> str:
+    """Cambia todos los saltos (CRLF, CR, LF) por el pedido; keep los deja como están."""
+    if eol == EOL_KEEP:
+        return text
+    target = _EOL_VALUES[eol]
+    return "".join(content + (target if old else "") for content, old in split_lines(text))
+
+
+# --------------------------------------------------------------------------
+# Sustitución de caracteres (convert-lyrics --replace-char / --replace-map)
+# --------------------------------------------------------------------------
+
+# Marcas de tiempo [mm:ss.xx] y <mm:ss.xx>: las reglas nunca las tocan.
+_TIMESTAMP_TOKEN_RE = re.compile(r"[\[<]\d{1,3}:\d{1,2}(?:[.:,]\d{1,3})?[\]>]", re.ASCII)
+_ESCAPE_RE = re.compile(r"\\(u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|x[0-9a-fA-F]{2}|t|\\|=)")
+_FORBIDDEN_IN_TARGET = set("[]<>\r\n")
+
+
+class ReplaceRuleError(ValueError):
+    """Regla de sustitución no válida."""
+
+
+def _unescape(text: str) -> str:
+    def replace(match: re.Match) -> str:
+        code = match.group(1)
+        if code in ("\\", "="):
+            return code
+        if code == "t":
+            return "\t"
+        return chr(int(code[1:], 16))
+    return _ESCAPE_RE.sub(replace, text)
+
+
+def parse_replace_rule(value: str) -> tuple[str, str]:
+    """
+    "DE=A" -> (DE, A). Admite \\uXXXX, \\UXXXXXXXX, \\xXX, \\t, \\\\ y \\= (un "="
+    literal). A puede estar vacío (borrar). A no puede contener [ ] < > ni
+    saltos de línea: podría crear marcas de tiempo o partir líneas.
+    """
+    position = 0
+    while True:
+        position = value.find("=", position)
+        if position < 0:
+            raise ReplaceRuleError(f"Regla sin '=': {value!r} (formato DE=A).")
+        if position > 0 and value[position - 1] == "\\" and not value[:position].endswith("\\\\"):
+            position += 1
+            continue
+        break
+    source, target = _unescape(value[:position]), _unescape(value[position + 1:])
+    if not source:
+        raise ReplaceRuleError(f"Regla con origen vacío: {value!r}.")
+    if any(char in "\r\n" for char in source):
+        raise ReplaceRuleError(f"El origen no puede contener saltos de línea: {value!r}.")
+    bad = sorted(set(target) & _FORBIDDEN_IN_TARGET)
+    if bad:
+        raise ReplaceRuleError(f"El destino no puede contener {' '.join(repr(c) for c in bad)}: {value!r}.")
+    return source, target
+
+
+def load_replace_map(path) -> list[tuple[str, str]]:
+    """
+    Reglas de un archivo UTF-8: una por línea, "DE=A" o "DE<TAB>A". Las
+    líneas vacías y las que empiezan con "#" se ignoran.
+    """
+    rules = []
+    with open(path, "r", encoding="utf-8-sig") as handle:
+        for number, line in enumerate(handle, 1):
+            line = line.rstrip("\r\n")
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            if "\t" in line:
+                source, target = line.split("\t", 1)
+                line = source.replace("=", "\\=") + "=" + target
+            try:
+                rules.append(parse_replace_rule(line))
+            except ReplaceRuleError as exc:
+                raise ReplaceRuleError(f"{path}, línea {number}: {exc}") from exc
+    return rules
+
+
+def apply_replacements(text: str, rules: list[tuple[str, str]]) -> tuple[str, list[int]]:
+    """
+    Aplica las reglas en orden, fuera de las marcas de tiempo. Retorna
+    (texto, cantidad de sustituciones por regla).
+    """
+    counts = [0] * len(rules)
+    if not rules:
+        return text, counts
+    parts = []
+    position = 0
+    for match in _TIMESTAMP_TOKEN_RE.finditer(text):
+        parts.append((text[position:match.start()], True))
+        parts.append((match.group(), False))
+        position = match.end()
+    parts.append((text[position:], True))
+    out = []
+    for segment, editable in parts:
+        if editable:
+            for index, (source, target) in enumerate(rules):
+                found = segment.count(source)
+                if found:
+                    counts[index] += found
+                    segment = segment.replace(source, target)
+        out.append(segment)
+    return "".join(out), counts
+
+
+def describe_rule(rule: tuple[str, str]) -> str:
+    source, target = rule
+    return f"«{visible(source)}» → «{visible(target)}»" if target else f"«{visible(source)}» → (borrar)"
 
 
 # --------------------------------------------------------------------------

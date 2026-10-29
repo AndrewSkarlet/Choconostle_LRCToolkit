@@ -445,7 +445,11 @@ def _revert_edit(record: dict, items: list[dict], folder: Path, root: Path, dry_
             slot = item["slot"]
             expected[(slot["key"], slot["index"])] = _python_value(item["original_value"])
         mode = MODE_FULL if record["mode"] == MODE_FULL else record["mode"]
-        edit = Edit(inverse, mode, len(current), len(original), "", expected)
+        # Frames ID3 cuya codificación cambió (convert-lyrics --id3-encoding): vuelven a la original.
+        encodings = {item["slot"]["key"]: item["original_encoding"] for item in items
+                     if item.get("new_encoding") is not None and item.get("original_encoding") is not None
+                     and item["new_encoding"] != item["original_encoding"]}
+        edit = Edit(inverse, mode, len(current), len(original), "", expected, encodings)
         write_edit(path, editor, edit, Journal(folder), f"revert-{record['id']:04d}",
                    file_signature(path), record["path"])
         _restore_mtime(path, record)

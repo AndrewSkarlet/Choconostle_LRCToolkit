@@ -105,6 +105,9 @@ choconostle normalize-lyrics ~/Música --resume ~/Música/ChoconostleLRCTool_bac
 # Si solo quieres dejar a salvo un archivo que quedó a medias, sin continuar
 choconostle recover ~/Música/ChoconostleLRCTool_back/2026-10-15_20-30-00
 
+# Convertir a UTF-8 sin BOM con saltos LF (ver «Convertir letras»)
+choconostle convert-lyrics ~/Música --apply
+
 # Borrar respaldos de más de 30 días (simulación; con --apply los borra)
 choconostle clean-backups ~/Música --older-than 30
 ```
@@ -310,6 +313,60 @@ Las rutas y comandos que hay que copiar («Para deshacer», «Para continuar», 
 - con entradas sin confirmar en el diario;
 - con una fecha que no se puede leer.
 
+## Convertir letras (convert-lyrics)
+
+`convert-lyrics` cambia la codificación, los saltos de línea y caracteres concretos de las letras. Usa el mismo sistema que `normalize-lyrics`: simulación por defecto, `--apply`, plan en disco, diario, respaldo, `--resume`, `revert` y las mismas comprobaciones antes y después de escribir.
+
+```bash
+# Simulación: qué archivos cambiarían y por qué (codificación detectada y si es fiable)
+choconostle convert-lyrics ~/Música --diff
+
+# Aplicar con los valores por defecto: UTF-8 sin BOM y saltos LF
+choconostle convert-lyrics ~/Música --apply
+
+# Desempatar Windows-1252 frente a Windows-1250 en letras en español
+choconostle convert-lyrics ~/Música --prefer-encoding cp1252 --apply
+
+# Sustituir el apóstrofo tipográfico, también en las letras incrustadas
+choconostle convert-lyrics ~/Música --replace-char "’='" --apply
+```
+
+| Opción | Descripción |
+|---|---|
+| `--to CÓDEC` | Codificación de destino de los `.lrc`/`.txt`: `utf8` (sin BOM, por defecto), `utf8-bom` o cualquier códec de Python (`cp1252`, `shift_jis`, `utf-16`...). |
+| `--eol lf\|crlf\|keep` | Saltos de línea de los `.lrc`/`.txt`. Por defecto `lf`; `keep` conserva los originales, aunque estén mezclados. |
+| `--source-encoding CÓDEC` | Codificación de origen de los archivos de 8 bits cuya detección no es fiable. Nunca se aplica a archivos con BOM, UTF-8 válido o UTF-16. |
+| `--prefer-encoding CÓDEC` | Desempata cuando charset-normalizer devuelve candidatos empatados de familias distintas (p. ej. cp1250 y cp1252). Solo se usa si está entre los empatados. |
+| `--replace-char DE=A` | Sustitución (se puede repetir). `\uXXXX` para escribir un carácter por su código, `\=` para un `=` literal; `A` vacío borra. |
+| `--replace-map ARCHIVO` | Sustituciones desde un archivo UTF-8: una por línea (`DE=A` o `DE<TAB>A`); `#` para comentarios. |
+| `--id3-encoding latin1\|utf16\|utf8` | Codificación de los frames de letra ID3 (`USLT`, `SYLT`, `TXXX` de letra). |
+| `--on-unencodable skip\|error` | Si el destino no puede representar algún carácter: `skip` (por defecto) omite el archivo y lo lista; `error` detiene todo antes de modificar nada. |
+| `--allow-full-rewrite`, `--only`, `--diff`, `--limit`, `--resume`, `--verify`, `--include-hidden`, `--no-progress` | Igual que en `normalize-lyrics`. |
+
+**Archivos y letras incrustadas.**
+- `--to` y `--eol` solo se aplican a los archivos `.lrc`/`.txt`.
+- Las letras incrustadas solo cambian con `--replace-char`/`--replace-map` (el texto) o con `--id3-encoding` (la codificación de los frames ID3). Sin esas opciones no se leen ni se tocan.
+
+**Codificación de origen.** Un archivo solo se convierte si su codificación de origen es segura:
+- BOM, UTF-8 válido o UTF-16;
+- una detección fiable de charset-normalizer (ver «Codificación de origen» en `normalize-lyrics`);
+- un empate resuelto con `--prefer-encoding`;
+- `--source-encoding` en un archivo de 8 bits.
+
+Si no, se omite y se lista con los candidatos. En `--diff` y en la lista de cambios se indica, por cada archivo, la codificación de origen y si es fiable. Si el texto parece mojibake se avisa, pero no se repara.
+
+**Nunca se sustituyen caracteres por `?`.** Si el destino (`--to` o `--id3-encoding latin1`) no puede representar algún carácter, el archivo se omite y se lista con los caracteres que faltan. Con `--on-unencodable error`, la ejecución se detiene antes de aplicar nada.
+
+**Sustituciones.**
+- Se aplican en el orden indicado y **nunca tocan las marcas de tiempo** `[mm:ss.xx]` ni `<mm:ss.xx>`. Las cabeceras (`[ti:...]`) sí, porque son texto.
+- El destino no puede contener `[`, `]`, `<`, `>` ni saltos de línea, para no crear marcas de tiempo ni partir líneas.
+- Cada regla se registra con la cantidad de sustituciones que hizo en cada letra.
+
+**`--id3-encoding`.**
+- Solo se rehacen los frames de letra (codificación, descripción y textos). Los demás frames quedan idénticos byte a byte.
+- `utf8` solo es válido en ID3v2.4: en un tag v2.3 el frame se omite, y la versión del tag nunca se cambia.
+- Pasar de Latin-1 a UTF-16 suele duplicar el tamaño y no caber en el relleno. Esos archivos necesitan reescritura completa: la simulación los cuenta por formato («Necesitarían reescritura completa: 7 (MP3: 7)») y se omiten salvo con `--allow-full-rewrite`.
+
 ## Estructura
 
 ```
@@ -324,6 +381,7 @@ src/choconostle/
 ├── rawtags/        Edición byte a byte: id3, flac, mp4, apev2, ogg y writer (escritura verificada, diario)
 ├── legacy_embedded.py  Edición con mutagen de la v0.2.0 (solo para revertir respaldos antiguos)
 ├── normalizer.py   Fase 2: LyricsNormalizer (cabeceras, offset, codificación)
+├── converter.py    convert-lyrics: codificación, saltos de línea, sustituciones, --id3-encoding
 ├── textio.py       Líneas sin pérdida, detección y conversión de codificación, diff
 ├── run.py          Ejecución en dos pasadas: plan en disco, diario, --resume, clean-backups
 ├── backup.py       Revert (todas las versiones de respaldo) y recover

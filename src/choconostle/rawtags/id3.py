@@ -110,6 +110,28 @@ class LyricFrame:
     trailing: bool = False
     """USLT/TXXX: el último texto lleva terminador."""
 
+    def reencoded(self, encoding: int) -> "LyricFrame":
+        """
+        El mismo frame con otra codificación de texto (convert-lyrics
+        --id3-encoding): se rehacen el byte de codificación, la descripción y
+        el BOM de cada cadena (UTF-16 con BOM FF FE). Idioma, formato de
+        tiempo y tipo de contenido (SYLT) no cambian.
+        """
+        if encoding == self.encoding:
+            return self
+        bom = b"\xff\xfe" if encoding == 1 else b""
+        head = bytes([encoding])
+        if self.frame_id in ("USLT", "SYLT"):
+            head += self.head[1:4]
+        if self.frame_id == "SYLT":
+            head += self.head[4:6]
+        head += _encode(self.desc, encoding, bom) + _TERMINATORS[encoding]
+        if self.frame_id == "SYLT":
+            values = [(text, bom, time) for text, _b, time in self.values]
+        else:
+            values = [(text, bom) for text, _b in self.values]
+        return LyricFrame(self.frame_id, encoding, head, self.desc, self.lang, values, self.trailing)
+
     def build(self, new_values=None) -> bytes:
         """Cuerpo del frame; `new_values` reemplaza los textos (misma forma, sin BOM)."""
         term = _TERMINATORS[self.encoding]
@@ -370,18 +392,33 @@ class ID3Editor:
                     found.append(Slot(TAG_FORMAT, frame.key, index, f"TXXX:{lyric.desc}", text, lyric.encoding))
         return found
 
-    def build(self, values: dict) -> Edit:
-        """`values`: {(clave, índice): valor nuevo}."""
+    def build(self, values: dict, encodings: dict | None = None) -> Edit:
+        """
+        `values`: {(clave, índice): valor nuevo}. `encodings`: {clave del
+        frame: codificación nueva} (0 Latin-1, 1 UTF-16, 3 UTF-8 solo en v2.4).
+        """
+        encodings = {key: enc for key, enc in (encodings or {}).items()}
         patches: list[Patch] = []
         delta = 0
         expected = {}
+        changed_encodings = {}
         for frame in self.layout.frames:
             if frame.lyric is None:
                 continue
             mine = {index: value for (key, index), value in values.items() if key == frame.key}
-            if not mine:
+            new_encoding = encodings.get(frame.key)
+            if not mine and new_encoding in (None, frame.lyric.encoding):
                 continue
             lyric = frame.lyric
+            if new_encoding is not None and new_encoding != lyric.encoding:
+                if new_encoding in (2, 3) and self.layout.version < 4:
+                    raise Unsupported("id3_utf8_needs_v24")
+                try:
+                    lyric = lyric.reencoded(new_encoding)
+                except UnicodeEncodeError as exc:
+                    raise Unsupported("id3_unencodable", f"la descripción del frame {frame.frame_id} no cabe "
+                                                         "en la codificación pedida") from exc
+                changed_encodings[frame.key] = new_encoding
             if frame.frame_id == "TXXX":
                 texts = [text for text, _bom in lyric.values]
                 for index, value in mine.items():
@@ -390,10 +427,11 @@ class ID3Editor:
                 for index, text in enumerate(texts):
                     expected[(frame.key, index)] = text
             elif frame.frame_id == "USLT":
-                new_values = [mine[0]]
-                expected[(frame.key, 0)] = mine[0]
+                new_values = [mine.get(0, lyric.values[0][0])]
+                expected[(frame.key, 0)] = new_values[0]
             else:
-                new_values = [(text, time) for text, time in mine[0]]
+                current = [(text, time) for text, _bom, time in lyric.values]
+                new_values = [(text, time) for text, time in mine.get(0, current)]
                 expected[(frame.key, 0)] = new_values
             try:
                 body = lyric.build(new_values)
@@ -411,7 +449,8 @@ class ID3Editor:
             if new_padding != padding:
                 patches.append(Patch(self.layout.padding_offset, b"\0" * padding, b"\0" * new_padding))
             note = f"relleno ID3 {padding} -> {new_padding} bytes" if new_padding != padding else ""
-            return Edit(patches, MODE_INPLACE, len(self.region), len(self.region), note, expected)
+            return Edit(patches, MODE_INPLACE, len(self.region), len(self.region), note, expected,
+                        changed_encodings)
 
         if self.in_chunk:
             raise Unsupported("id3_chunk_grow")
@@ -420,10 +459,14 @@ class ID3Editor:
         new_size = self.layout.size + delta - padding
         patches.append(Patch(6, self.region[6:10], to_syncsafe(new_size)))
         return Edit(patches, MODE_FULL, len(self.region), len(self.region) + delta - padding,
-                    f"el tag ID3 crece {delta - padding} bytes", expected)
+                    f"el tag ID3 crece {delta - padding} bytes", expected, changed_encodings)
 
-    def verify(self, new_region: bytes, expected: dict) -> list[str]:
-        """Diferencias no previstas entre la región original y la nueva."""
+    def verify(self, new_region: bytes, expected: dict, encodings: dict | None = None) -> list[str]:
+        """
+        Diferencias no previstas entre la región original y la nueva.
+        `encodings`: frames cuya codificación debía cambiar (y a cuál).
+        """
+        encodings = encodings or {}
         problems = []
         try:
             new = parse_tag(new_region)
@@ -447,7 +490,14 @@ class ID3Editor:
             if after.lyric is None or after.key != before.key:
                 problems.append(f"el frame de letra {before.key} desapareció")
                 continue
-            if after.lyric.head != before.lyric.head or after.flags != before.flags:
+            if before.key in encodings:
+                old_head, new_head = before.lyric, after.lyric
+                if new_head.encoding != encodings[before.key]:
+                    problems.append(f"la codificación del frame {before.key} no quedó como se pidió")
+                if (new_head.lang, new_head.desc) != (old_head.lang, old_head.desc) or after.flags != before.flags \
+                        or (before.frame_id == "SYLT" and new_head.head[4:6] != old_head.head[4:6]):
+                    problems.append(f"cambió la cabecera del frame {before.key}")
+            elif after.lyric.head != before.lyric.head or after.flags != before.flags:
                 problems.append(f"cambió la cabecera del frame {before.key}")
             new_slots = {(s.key, s.index): s.value for s in ID3Editor._slots_of(after)}
             for key, value in new_slots.items():

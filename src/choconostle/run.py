@@ -1,7 +1,7 @@
 """
 run.py
 
-Ejecución en dos pasadas de normalize-lyrics, pensada para bibliotecas
+Ejecución en dos pasadas de normalize-lyrics y convert-lyrics, pensada para bibliotecas
 grandes en tarjetas SD.
 
 1. Planificación: se recorre la biblioteca carpeta por carpeta y cada
@@ -415,7 +415,9 @@ class RecordBuilder:
                 out.append(record)
             slot = _base_record(change)
             slot.update({"item": self.next_item, "ref": change.slot.ref() if change.slot else None,
-                         "original": _jsonable(change.original_value), "new": _jsonable(change.new_value)})
+                         "original": _jsonable(change.original_value), "new": _jsonable(change.new_value),
+                         "original_encoding": change.slot.id3_encoding if change.slot else None,
+                         "new_encoding": change.new_encoding})
             self.next_item += 1
             if self.with_diff and change.status == "change":
                 slot["diff"] = diff_lines(change.original_text, change.new_text)
@@ -452,6 +454,8 @@ class Totals:
     largest_rewrite: int = 0
     """Mayor espacio temporal necesario a la vez (archivo temporal más grande)."""
     files_seen: int = 0
+    full_rewrites: Counter = field(default_factory=Counter)
+    """Archivos de audio que necesitarían reescritura completa, por extensión (permitida o no)."""
 
     def add(self, record: dict) -> None:
         slots = [record] if record["type"] == "file" else record["slots"]
@@ -463,6 +467,9 @@ class Totals:
         reasons = {slot["skip_reason"] for slot in slots if slot["status"] == "skipped" and slot["skip_reason"]}
         for reason in reasons:
             self.skip_reasons[reason] += 1
+        if record["type"] == "audio" and ("full_rewrite" in reasons or (
+                record["status"] == "change" and record["plan"] and record["plan"]["mode"] == MODE_FULL)):
+            self.full_rewrites[Path(record["path"]).suffix.lower().lstrip(".") or "?"] += 1
         if record["status"] != "change":
             return
         self.entries += 1
@@ -491,7 +498,7 @@ class Totals:
                 "entries": self.entries, "nearly_empty": self.nearly_empty, "unknown": self.unknown,
                 "skip_reasons": dict(self.skip_reasons), "space": self.space,
                 "largest_rewrite": self.largest_rewrite, "needed": self.needed(),
-                "files_seen": self.files_seen}
+                "files_seen": self.files_seen, "full_rewrites": dict(self.full_rewrites)}
 
 
 # --------------------------------------------------------------------------
@@ -682,7 +689,7 @@ def _mark_interrupted(run: Run, root: Path, stop: StopRun) -> None:
     try:
         run.save_state(state=STATE_INTERRUPTED, stop_reason=str(stop), stop_kind=stop.kind)
         run.log(["", f"=== DETENIDO: {stop} ===",
-                 f"Para continuar: choconostle normalize-lyrics \"{root}\" --resume \"{run.folder}\""])
+                 f"Para continuar: choconostle {run.state['command']} \"{root}\" --resume \"{run.folder}\""])
     except OSError:
         pass
 
@@ -774,7 +781,9 @@ def _apply_audio(run: Run, root: Path, record: dict, journal: Journal, verify: s
             if current.get((ref["key"], ref["index"])) != python_value(slot["original"]):
                 raise ChangedError("la letra cambió desde que se planearon los cambios")
         values = {(slot["ref"]["key"], slot["ref"]["index"]): python_value(slot["new"]) for slot in changed}
-        edit = editor.build(values)
+        encodings = {slot["ref"]["key"]: slot["new_encoding"] for slot in changed
+                     if slot.get("new_encoding") is not None}
+        edit = editor.build(values, encodings)
         if edit.mode != plan["mode"]:
             raise ChangedError("la forma de escribir cambió desde que se planearon los cambios")
     except (Unsupported, ChangedError) as exc:
@@ -880,7 +889,17 @@ def _log_footer(run: Run, summary: ApplySummary) -> None:
 # Reanudación
 # --------------------------------------------------------------------------
 
-def resume_check(run: Run, root: Path, normalizer) -> list[str]:
+def processor_for(run: Run):
+    """Normalizador o conversor con las opciones guardadas de la ejecución."""
+    options = run.state["options"]
+    if run.state.get("command") == "convert-lyrics":
+        from choconostle.converter import LyricsConverter
+        return LyricsConverter.from_options(options)
+    from choconostle.normalizer import LyricsNormalizer
+    return LyricsNormalizer.from_options(options)
+
+
+def resume_check(run: Run, root: Path, normalizer, command: str | None = None) -> list[str]:
     """
     Comprueba que la ejecución se puede reanudar con seguridad y resuelve
     las entradas que quedaron a medias. Retorna los problemas; si hay
@@ -889,8 +908,10 @@ def resume_check(run: Run, root: Path, normalizer) -> list[str]:
     root = Path(root)
     problems = []
     phase = run.phase
-    if run.state.get("command") != "normalize-lyrics":
-        problems.append(f"la ejecución es de otro comando ({run.state.get('command')}).")
+    expected = command or getattr(normalizer, "command", "normalize-lyrics")
+    if run.state.get("command") != expected:
+        problems.append(f"la ejecución es de otro comando ({run.state.get('command')}); "
+                        f"reanúdala con choconostle {run.state.get('command')} --resume.")
     if phase == STATE_COMPLETED:
         problems.append("la ejecución ya está completada: no hay nada que reanudar.")
     elif phase == STATE_PLANNING or not run.plan_complete():
@@ -1074,7 +1095,8 @@ def _items(record: dict) -> list[dict]:
     if record["type"] == "file":
         return [{"id": record["item"], "kind": "file", "path": record["path"], "label": record["label"]}]
     return [{"id": slot["item"], "kind": "embedded", "path": record["path"], "label": slot["label"],
-             "slot": slot["ref"], "original_value": slot["original"]}
+             "slot": slot["ref"], "original_value": slot["original"],
+             "original_encoding": slot.get("original_encoding"), "new_encoding": slot.get("new_encoding")}
             for slot in record["slots"] if slot["status"] == "change"]
 
 

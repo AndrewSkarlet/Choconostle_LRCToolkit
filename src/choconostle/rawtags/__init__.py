@@ -50,6 +50,7 @@ REASONS = {
     "id3_frame_flags": "frame de letra comprimido, cifrado o con otras marcas",
     "id3_frame_format": "frame de letra con formato no reproducible",
     "id3_unencodable": "el texto nuevo no cabe en la codificación del frame",
+    "id3_utf8_needs_v24": "UTF-8 en ID3 solo es válido en ID3v2.4 (el tag es v2.3)",
     "id3_chunk_grow": "ID3 dentro de WAV/AIFF sin relleno suficiente",
     "flac_invalid": "estructura FLAC no válida",
     "vorbis_invalid": "comentario Vorbis no válido",
@@ -141,6 +142,8 @@ class Edit:
     """Detalle para el reporte (p. ej. "relleno ID3 256 -> 512 bytes")."""
     expected: dict = field(default_factory=dict)
     """{(clave, índice): valor} de las letras tras la edición."""
+    encodings: dict = field(default_factory=dict)
+    """ID3: {clave del frame: codificación nueva} (convert-lyrics --id3-encoding)."""
 
 
 @dataclass

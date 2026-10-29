@@ -216,3 +216,42 @@ def test_pure_python_charset_normalizer(tmp_path):
     for name, hexdata in samples.items():
         detection = detect_encoding(bytes.fromhex(hexdata))
         assert [detection.encoding, detection.confident] == pure[name][:2], name
+
+
+# --- convert-lyrics: desempate, saltos de línea y sustituciones -----------
+
+def test_prefer_encoding_only_breaks_ties():
+    from choconostle.textio import judge_candidates
+    spanish = "Canción ñandú pingüino".encode("cp1252")
+    tie = [("cp1250", 0.0), ("cp1252", 0.0)]
+    detection = judge_candidates(spanish, tie, prefer="cp1252")
+    assert detection.confident and detection.tie_broken and detection.encoding == "cp1252"
+    assert "desempatada con --prefer-encoding" in detection.describe()
+    assert not judge_candidates(spanish, tie, prefer="cp1251").confident  # no está entre los empatados
+    # Sin empate, la preferencia no cambia nada.
+    detection = judge_candidates(KOREAN, [("cp949", 0.0), ("euc_jis_2004", 0.15)], prefer="cp1252")
+    assert detection.encoding == "cp949" and not detection.tie_broken
+
+
+def test_convert_eol():
+    from choconostle.textio import convert_eol
+    text = "a\r\nb\rc\nd"
+    assert convert_eol(text, "lf") == "a\nb\nc\nd"
+    assert convert_eol(text, "crlf") == "a\r\nb\r\nc\r\nd"
+    assert convert_eol(text, "keep") == text
+    assert convert_eol("a b\n", "crlf") == "a b\r\n"  # U+2028 no es un salto
+
+
+def test_replace_rules():
+    from choconostle.textio import ReplaceRuleError, apply_replacements, parse_replace_rule
+    assert parse_replace_rule("’='") == ("’", "'")
+    assert parse_replace_rule("\\u2019='") == ("’", "'")
+    assert parse_replace_rule("a\\=b=c") == ("a=b", "c")
+    assert parse_replace_rule("x=") == ("x", "")
+    for bad in ("=x", "sin igual", "a=[", "a=]", "a=<", "a=>"):
+        with pytest.raises(ReplaceRuleError):
+            parse_replace_rule(bad)
+    text = "[00:01.00]It’s <00:01.50>don’t 10 [00:02.00]"
+    new, counts = apply_replacements(text, [("’", "'"), ("0", "O")])
+    assert new == "[00:01.00]It's <00:01.50>don't 1O [00:02.00]"
+    assert counts == [2, 1]

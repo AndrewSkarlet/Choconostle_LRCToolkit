@@ -139,7 +139,7 @@ class FlacEditor:
                      comment.value.decode("utf-8"))
                 for comment, key, index in _lyric_comments(self.layout)]
 
-    def build(self, values: dict) -> Edit:
+    def build(self, values: dict, encodings: dict | None = None) -> Edit:
         patches = []
         delta = 0
         expected = {}
@@ -191,7 +191,7 @@ class FlacEditor:
         return Edit(patches, MODE_FULL, len(self.region), len(self.region) + delta,
                     f"los metadatos FLAC crecen {delta} bytes", expected)
 
-    def verify(self, new_region: bytes, expected: dict) -> list[str]:
+    def verify(self, new_region: bytes, expected: dict, encodings: dict | None = None) -> list[str]:
         problems = []
         try:
             new = _parse(new_region)

@@ -494,6 +494,8 @@ class LyricsChange:
     """Datos del archivo al planificar: firma, hash de la región, modo de escritura."""
     skip_reason: str | None = None
     """Motivo de omisión (clave de rawtags.REASONS) si no se puede editar."""
+    new_encoding: int | None = None
+    """ID3: codificación nueva del frame (convert-lyrics --id3-encoding)."""
 
     # Texto (para el registro y la vista previa).
     original_text: str = ""
@@ -745,41 +747,7 @@ class LyricsNormalizer:
         return changes
 
     def _plan_file_edit(self, editor, signature, changed: list[LyricsChange]) -> None:
-        """Comprueba que la edición de bytes es posible y cómo se escribirá."""
-        if not changed:
-            return
-
-        def skip(reason, message):
-            for change in changed:
-                change.status = STATUS_SKIPPED
-                change.skip_reason = reason
-                change.message = message
-                change.details = []
-
-        values = {(c.slot.key, c.slot.index): c.new_value for c in changed}
-        try:
-            edit = editor.build(values)
-            if not isinstance(editor, OggEditor):
-                problems = editor.verify(apply_patches(editor.region, edit.patches), edit.expected)
-                if problems:
-                    raise Unsupported("id3_frame_format", "la edición no sería segura: " + "; ".join(problems))
-        except Unsupported as exc:
-            skip(exc.reason, str(exc))
-            return
-        note = edit.note
-        if edit.mode == MODE_FULL:
-            size_after = signature[0] + edit.new_len - edit.old_len
-            note = (f"reescritura completa, requiere {format_size(required_space(size_after))} libres"
-                    + (f" ({edit.note})" if edit.note else ""))
-            if not self.allow_full_rewrite:
-                skip("full_rewrite", f"{note}. Usa --allow-full-rewrite para aplicarla.")
-                return
-        plan = {"signature": list(signature), "mode": edit.mode,
-                "region_sha": None if isinstance(editor, OggEditor) else sha256(editor.region)}
-        for change in changed:
-            change.file_plan = plan
-            if note:
-                change.details.append(note)
+        plan_file_edit(editor, signature, changed, self.allow_full_rewrite)
 
     def _plan_text_slot(self, change: LyricsChange, slot: Slot, headers) -> None:
         text = slot.value or ""
@@ -839,6 +807,50 @@ class LyricsNormalizer:
         runs.plan_from_changes(execution, changes, root)
         runs.apply_run(execution, self, root, verify=verify)
         return execution
+
+
+def plan_file_edit(editor, signature, changed: list[LyricsChange], allow_full_rewrite: bool) -> None:
+    """
+    Comprueba que la edición byte a byte de las letras `changed` de un
+    archivo es posible y segura, y cómo se escribirá (en su sitio, al
+    final o reescritura completa). Si no se puede, marca las letras como
+    omitidas con el motivo. Compartida por normalize-lyrics y convert-lyrics.
+    """
+    if not changed:
+        return
+
+    def skip(reason, message):
+        for change in changed:
+            change.status = STATUS_SKIPPED
+            change.skip_reason = reason
+            change.message = message
+            change.details = []
+
+    values = {(c.slot.key, c.slot.index): c.new_value for c in changed}
+    encodings = {c.slot.key: c.new_encoding for c in changed if c.new_encoding is not None}
+    try:
+        edit = editor.build(values, encodings)
+        if not isinstance(editor, OggEditor):
+            problems = editor.verify(apply_patches(editor.region, edit.patches), edit.expected, edit.encodings)
+            if problems:
+                raise Unsupported("id3_frame_format", "la edición no sería segura: " + "; ".join(problems))
+    except Unsupported as exc:
+        skip(exc.reason, str(exc))
+        return
+    note = edit.note
+    if edit.mode == MODE_FULL:
+        size_after = signature[0] + edit.new_len - edit.old_len
+        note = (f"reescritura completa, requiere {format_size(required_space(size_after))} libres"
+                + (f" ({edit.note})" if edit.note else ""))
+        if not allow_full_rewrite:
+            skip("full_rewrite", f"{note}. Usa --allow-full-rewrite para aplicarla.")
+            return
+    plan = {"signature": list(signature), "mode": edit.mode,
+            "region_sha": None if isinstance(editor, OggEditor) else sha256(editor.region)}
+    for change in changed:
+        change.file_plan = plan
+        if note:
+            change.details.append(note)
 
 
 def distinct_labels(slots: list[Slot]) -> list[str]:

@@ -147,7 +147,7 @@ class MP4Editor:
         return [Slot(TAG_FORMAT, LYRICS_KEY, index, LYRICS_KEY, value)
                 for index, value in enumerate(self.values)]
 
-    def build(self, values: dict) -> Edit:
+    def build(self, values: dict, encodings: dict | None = None) -> Edit:
         region = self.region
         patches = []
         delta = 0
@@ -223,7 +223,7 @@ class MP4Editor:
         content = content[:new_size - 8] if delta > 0 else content + b"\0" * (-delta)
         return Patch(free.offset, old, struct.pack(">I", new_size) + old[4:8] + content)
 
-    def verify(self, new_region: bytes, expected: dict) -> list[str]:
+    def verify(self, new_region: bytes, expected: dict, encodings: dict | None = None) -> list[str]:
         problems = []
         try:
             moov_size = struct.unpack(">I", new_region[:4])[0]

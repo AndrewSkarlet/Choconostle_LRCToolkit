@@ -3,8 +3,22 @@
 ## Sin publicar - Fase 2.1
 
 ### Pendiente
-- Etapa 4 (`convert-lyrics`): opción de desempate de codificación, p. ej. `--prefer-encoding cp1252`. Serviría cuando charset-normalizer devuelve candidatos empatados de familias distintas (como cp1250 y cp1252 en español) y hoy el archivo se considera ambiguo.
 - Etapa 6: medir memoria y tiempo con bibliotecas sintéticas de tamaño creciente. Sigue creciendo con la biblioteca la tabla de resultados por entrada que se arma al reanudar, revertir y mostrar el reporte (un diccionario de identificadores).
+
+### Etapa 4: convert-lyrics
+
+#### Agregado
+- Comando `convert-lyrics`, con el mismo sistema de ejecución que `normalize-lyrics`: simulación, `--apply`, plan en disco, diario, respaldo, `--resume`, `revert`, verificación antes y después de escribir, `--verify` y `--allow-full-rewrite`.
+  - `--to` (por defecto `utf8`, sin BOM) y `--eol lf|crlf|keep` (por defecto `lf`), solo para `.lrc`/`.txt`.
+  - `--source-encoding` (solo para archivos de 8 bits) y `--prefer-encoding` (desempate entre candidatos de familias distintas, como cp1250 y cp1252).
+  - `--replace-char DE=A` y `--replace-map ARCHIVO`: nunca tocan las marcas de tiempo; se registra cuántas sustituciones hizo cada regla. También se aplican a las letras incrustadas.
+  - `--id3-encoding latin1|utf16|utf8`: recodifica solo los frames de letra ID3. `utf8` solo en ID3v2.4, y la versión del tag no cambia. `revert` restaura la codificación original byte a byte.
+  - `--on-unencodable skip|error`: nunca se sustituye por `?`.
+- El reporte indica, por archivo, la codificación de origen y si es fiable, y cuántos archivos de audio necesitarían reescritura completa, por formato.
+- Pruebas con la biblioteca de casos y archivos creados con `generar_casos.py`. La desconexión y `--resume` se prueban en los modos «posix» y «windows».
+
+#### Cambiado
+- La ejecución (`run.py`), el reporte y la CLI son comunes a los dos comandos (`_execute`, `processor_for`). `--resume` comprueba que la ejecución sea del mismo comando.
 
 ### Etapa 3: bibliotecas grandes, reanudación y limpieza
 

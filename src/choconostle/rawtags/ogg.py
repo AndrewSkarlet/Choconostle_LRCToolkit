@@ -79,7 +79,7 @@ class OggEditor:
                 found.append(Slot(TAG_FORMAT, lower, index, key.upper(), value))
         return found
 
-    def build(self, values: dict) -> Edit:
+    def build(self, values: dict, encodings: dict | None = None) -> Edit:
         expected = {(slot.key, slot.index): values.get((slot.key, slot.index), slot.value) for slot in self.slots()}
         return Edit([], MODE_FULL, 0, 0, "Ogg: el comentario va en las primeras páginas", expected)
 

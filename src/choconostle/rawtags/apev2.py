@@ -110,7 +110,7 @@ class APEv2Editor:
         return [Slot(TAG_FORMAT, key, index, key, value)
                 for key, values in self.values.items() for index, value in enumerate(values)]
 
-    def build(self, values: dict) -> Edit:
+    def build(self, values: dict, encodings: dict | None = None) -> Edit:
         region = self.region
         patches = []
         delta = 0
@@ -139,7 +139,7 @@ class APEv2Editor:
         return Edit(patches, MODE_TAIL, len(region), len(region) + delta,
                     f"tag APEv2 al final: el archivo cambia {delta:+d} bytes", expected)
 
-    def verify(self, new_region: bytes, expected: dict) -> list[str]:
+    def verify(self, new_region: bytes, expected: dict, encodings: dict | None = None) -> list[str]:
         problems = []
         footer_offset = self.footer_offset + len(new_region) - len(self.region)
         try:

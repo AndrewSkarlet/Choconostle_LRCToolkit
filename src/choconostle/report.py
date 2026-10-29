@@ -500,6 +500,28 @@ def print_report(report: dict, console: Console | None = None, limit: int = 20) 
 APPLY_LIST_MAX = 50
 
 
+def convert_option_lines(options: dict) -> list[str]:
+    """Opciones de convert-lyrics para el encabezado del reporte."""
+    from choconostle.textio import describe_rule, encoding_label, parse_target_encoding
+    target = parse_target_encoding(options["to"])
+    eol = {"lf": "LF", "crlf": "CRLF", "keep": "se conservan"}[options["eol"]]
+    lines = [f"Archivos .lrc/.txt: {target.label}; saltos de línea: {eol}",
+             "Codificación de origen: " + (f"{encoding_label(options['source_encoding'])} (--source-encoding, "
+                                           "para archivos de 8 bits)" if options["source_encoding"]
+                                           else "detectada (solo se convierte si es fiable)")]
+    if options.get("prefer_encoding"):
+        lines.append(f"Desempate: {encoding_label(options['prefer_encoding'])} (--prefer-encoding)")
+    rules = options.get("replacements") or []
+    if rules:
+        lines.append("Sustituciones: " + ", ".join(describe_rule(tuple(rule)) for rule in rules))
+    if options.get("id3_encoding"):
+        lines.append(f"Frames de letra ID3: {options['id3_encoding']} (--id3-encoding)")
+    if not rules and not options.get("id3_encoding"):
+        lines.append("Letras incrustadas: no se tocan (solo cambian con --replace-char o --id3-encoding)")
+    lines.append(f"Caracteres que no caben en el destino: {'omitir el archivo' if options['on_unencodable'] == 'skip' else 'detener todo'}")
+    return lines
+
+
 def print_run_report(
     run,
     console: Console | None = None,
@@ -510,9 +532,9 @@ def print_run_report(
     options: list[str] | None = None,
 ) -> None:
     """
-    Reporte de normalize-lyrics leído desde el plan y el diario en disco
-    (simulación o resultado de --apply). Cada sección recorre el plan sin
-    cargarlo entero en memoria.
+    Reporte de normalize-lyrics o convert-lyrics leído desde el plan y el
+    diario en disco (simulación o resultado de --apply). Cada sección
+    recorre el plan sin cargarlo entero en memoria.
     """
     from choconostle.normalizer import MODE_STRIP, skip_reason_label
 
@@ -541,11 +563,16 @@ def print_run_report(
         title = "APLICADO" if run.phase == "completed" else "APLICADO PARCIALMENTE (se detuvo)"
     else:
         title = "SIMULACIÓN (no se modificó nada)"
-    console.print(f"[bold]normalize-lyrics - {title}[/bold]")
-    mode = options_state["mode"]
-    console.print(f"Modo: {'quitar cabeceras' if mode == MODE_STRIP else 'estandarizar cabeceras (ar, ti, al, length)'}",
-                  markup=False)
-    console.print(f"Codificación de archivos .lrc/.txt: {options_state['encoding']}", markup=False)
+    command = run.state.get("command", "normalize-lyrics")
+    console.print(f"[bold]{command} - {title}[/bold]")
+    if command == "convert-lyrics":
+        for line in convert_option_lines(options_state):
+            console.print(line, markup=False)
+    else:
+        mode = options_state["mode"]
+        console.print(f"Modo: {'quitar cabeceras' if mode == MODE_STRIP else 'estandarizar cabeceras (ar, ti, al, length)'}",
+                      markup=False)
+        console.print(f"Codificación de archivos .lrc/.txt: {options_state['encoding']}", markup=False)
     for option in options or []:
         console.print(option, markup=False)
     print_copyable(console, f"Biblioteca: {root}")
@@ -574,7 +601,15 @@ def print_run_report(
         table.add_row("Requieren decisión (no se tocan)", f"[yellow]{statuses['decision']}[/yellow]")
     if totals["unknown"]:
         table.add_row("Con cabeceras desconocidas (se conservan)", str(totals["unknown"]))
-    table.add_row("Casi vacías (aviso)", str(totals["nearly_empty"]))
+    if command != "convert-lyrics":
+        table.add_row("Casi vacías (aviso)", str(totals["nearly_empty"]))
+    rewrites = totals.get("full_rewrites") or {}
+    if rewrites:
+        detail = ", ".join(f"{ext.upper()}: {count}" for ext, count in sorted(rewrites.items()))
+        allowed = options_state.get("allow_full_rewrite")
+        table.add_row("Necesitarían reescritura completa",
+                      f"[yellow]{sum(rewrites.values())}[/yellow] ({detail})"
+                      + ("" if allowed else " - se omiten sin --allow-full-rewrite"))
     if statuses.get("skipped"):
         table.add_row("Omitidas", str(statuses["skipped"]))
     if statuses.get("error"):
@@ -625,6 +660,8 @@ def print_run_report(
                 [slot for slot in record["slots"] if slot["status"] == "change"]
             for entry in entries:
                 table.add_row(Text(entry["label"]), Text("; ".join(entry["details"])))
+                if command == "convert-lyrics" and entry.get("source_encoding"):
+                    table.add_row(Text(""), Text(f"origen: {entry['source_encoding']}", style="dim"))
                 for warning in entry["warnings"]:
                     table.add_row(Text(""), Text(f"aviso: {warning}", style="yellow"))
             if applied:
@@ -700,7 +737,7 @@ def print_run_report(
         console.print(Text("Los archivos marcados como aplicados están confirmados en el diario; "
                            "el resto no se modificó o se restauró."))
         console.print("Para continuar:")
-        print_copyable(console, f'choconostle normalize-lyrics "{root}" --resume "{run.folder}"')
+        print_copyable(console, f'choconostle {command} "{root}" --resume "{run.folder}"')
     console.print("Respaldo guardado en:")
     print_copyable(console, str(run.folder))
     console.print("Para deshacer:")

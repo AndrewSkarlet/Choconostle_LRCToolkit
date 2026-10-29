@@ -7,6 +7,7 @@ Uso:
     choconostle scan RUTA [--group-by folder|tag] [--json reporte.json]
     choconostle normalize-lyrics RUTA --strip-headers|--standardize-headers [--apply]
     choconostle normalize-lyrics RUTA --resume CARPETA_DE_RESPALDO
+    choconostle convert-lyrics RUTA [--to utf8] [--eol lf] [--replace-char DE=A] [--apply]
     choconostle revert CARPETA_DE_RESPALDO
     choconostle recover CARPETA_DE_RESPALDO
     choconostle clean-backups RUTA --older-than DÍAS [--apply]
@@ -243,29 +244,46 @@ def normalize_lyrics(
         error_console.print(str(exc), style="red", markup=False)
         raise typer.Exit(code=2)
 
+    normalizer = LyricsNormalizer(
+        mode, encoding, strip_unknown=strip_unknown_headers,
+        offset_policy=offset_policy.value, skip_near_empty=skip_near_empty,
+        allow_full_rewrite=allow_full_rewrite,
+    )
+    _execute("normalize-lyrics", normalizer, path, apply, diff, show_limit, only or [], include_hidden,
+             verify.value, console, error_console, progress)
+
+
+def _execute(command, processor, path, apply, diff, limit, only, include_hidden, verify,
+             console, error_console, progress) -> None:
+    """
+    Ejecución en dos pasadas común a normalize-lyrics y convert-lyrics:
+    planificación en disco, aplicación con diario y respaldo, y reporte.
+    """
+    from choconostle.converter import ConversionAbort
+
     pending = pending_sessions(path)
     if pending:
         print_copyable(error_console, str(PendingWritesError(pending)), "yellow")
         if apply:
             raise typer.Exit(code=2)
 
-    normalizer = LyricsNormalizer(
-        mode, encoding, strip_unknown=strip_unknown_headers,
-        offset_policy=offset_policy.value, skip_near_empty=skip_near_empty,
-        allow_full_rewrite=allow_full_rewrite,
-    )
-    execution = runs.Run.create(path, "normalize-lyrics", dict(normalizer.options(), verify=verify.value),
-                                temporary=not apply)
+    execution = runs.Run.create(path, command, dict(processor.options(), verify=verify), temporary=not apply)
     keep_folder = apply
+    resume_hint = f'choconostle {command} "{path}" --resume "{execution.folder}"'
     try:
         progress.start_plan(count_files(path, include_hidden))
         try:
-            totals = runs.plan_library(execution, normalizer, path, only or [], include_hidden, progress)
+            totals = runs.plan_library(execution, processor, path, only, include_hidden, progress)
         except runs.StopRun as stop:
             progress.stop()
             keep_folder = False  # no se aplicó nada
             print_copyable(error_console, f"SE DETUVO: {stop}", "red")
             raise typer.Exit(code=3)
+        except ConversionAbort as exc:
+            progress.stop()
+            keep_folder = False
+            print_copyable(error_console, f"Se detuvo antes de modificar nada (--on-unencodable error): {exc}", "red")
+            raise typer.Exit(code=2)
         progress.stop()
         if execution.state.get("missing_albums"):
             names = ", ".join(execution.state["missing_albums"])
@@ -279,21 +297,21 @@ def normalize_lyrics(
         elif apply:
             try:
                 progress.start_apply(totals.entries)
-                summary = runs.apply_run(execution, normalizer, path, progress, verify=verify.value)
+                summary = runs.apply_run(execution, processor, path, progress, verify=verify)
             except runs.InsufficientSpace as exc:
                 progress.stop()
                 print_copyable(error_console, str(exc), "red")
                 error_console.print("Cuando haya espacio:")
-                print_copyable(error_console, f'choconostle normalize-lyrics "{path}" --resume "{execution.folder}"')
+                print_copyable(error_console, resume_hint)
                 raise typer.Exit(code=2)
             except KeyboardInterrupt:
                 progress.stop()
                 error_console.print("Interrumpido. Para continuar:", style="yellow")
-                print_copyable(error_console, f'choconostle normalize-lyrics "{path}" --resume "{execution.folder}"')
+                print_copyable(error_console, resume_hint)
                 raise typer.Exit(code=130)
             finally:
                 progress.stop()
-        _report(execution, console, error_console, path, show_limit, diff, apply,
+        _report(execution, console, error_console, path, limit, diff, apply,
                 summary or (runs.ApplySummary() if apply else None), _option_lines(execution.state["options"]))
         _exit_for(summary)
     finally:
@@ -302,7 +320,7 @@ def normalize_lyrics(
 
 
 def _option_lines(options: dict) -> list[str]:
-    lines = [f"Política de offset: {options['offset_policy']}"]
+    lines = [f"Política de offset: {options['offset_policy']}"] if "offset_policy" in options else []
     if options.get("strip_unknown_headers"):
         lines.append("Cabeceras desconocidas del inicio: se quitan")
     if options.get("skip_near_empty"):
@@ -332,7 +350,7 @@ def _report(execution, console, error_console, path, limit, diff, applied, summa
                             "El resto no se modificó o se restauró; el diario en la tarjeta dice qué terminó.",
                             markup=False)
         error_console.print("Cuando vuelvas a conectar la unidad, para continuar:")
-        print_copyable(error_console, f'choconostle normalize-lyrics "{path}" --resume "{execution.folder}"')
+        print_copyable(error_console, f'choconostle {execution.state["command"]} "{path}" --resume "{execution.folder}"')
 
 
 def _exit_for(summary) -> None:
@@ -344,16 +362,21 @@ def _exit_for(summary) -> None:
         raise typer.Exit(code=1)
 
 
-def _resume(path, folder, console, error_console, progress, show_limit, diff) -> None:
+def _resume(path, folder, console, error_console, progress, show_limit, diff,
+            command: str = "normalize-lyrics") -> None:
     try:
         execution = runs.Run(folder)
     except (FileNotFoundError, ValueError) as exc:
         print_copyable(error_console, f"No se puede reanudar: {exc}", "red")
         raise typer.Exit(code=2)
     options = execution.state["options"]
-    normalizer = LyricsNormalizer.from_options(options)
+    if execution.state.get("command") != command:
+        print_copyable(error_console, f"No se puede reanudar: la ejecución es de {execution.state.get('command')}; "
+                                      f"usa choconostle {execution.state.get('command')} --resume.", "red")
+        raise typer.Exit(code=2)
+    normalizer = runs.processor_for(execution)
     try:
-        problems = runs.resume_check(execution, path, normalizer)
+        problems = runs.resume_check(execution, path, normalizer, command)
     except OSError as exc:
         print_copyable(error_console, f"No se puede reanudar: la biblioteca o su respaldo no están accesibles ({exc}). "
                                       "No se modificó nada; vuelve a intentarlo cuando la unidad esté conectada.", "red")
@@ -423,6 +446,128 @@ class _RunProgress:
             self.progress = None
 
 
+class Eol(str, Enum):
+    lf = "lf"
+    crlf = "crlf"
+    keep = "keep"
+
+
+class Id3Encoding(str, Enum):
+    latin1 = "latin1"
+    utf16 = "utf16"
+    utf8 = "utf8"
+
+
+class OnUnencodable(str, Enum):
+    skip = "skip"
+    error = "error"
+
+
+@app.command("convert-lyrics")
+def convert_lyrics(
+    path: Path = typer.Argument(..., help="Carpeta de la biblioteca musical."),
+    to: str = typer.Option(
+        "utf8", "--to",
+        help="Codificación de destino de los .lrc/.txt: utf8 (sin BOM, por defecto), utf8-bom o cualquier "
+             "códec de Python (cp1252, shift_jis, utf-16...). No afecta a las letras incrustadas.",
+    ),
+    eol: Eol = typer.Option(
+        Eol.lf, "--eol",
+        help="Saltos de línea de los .lrc/.txt: lf (por defecto), crlf o keep (conservar, incluso mezclados). "
+             "No afecta a las letras incrustadas.",
+    ),
+    source_encoding: Optional[str] = typer.Option(
+        None, "--source-encoding",
+        help="Codificación de origen de los archivos de 8 bits cuya detección no es fiable (p. ej. cp1252). "
+             "Nunca se aplica a archivos con BOM, UTF-8 válido o UTF-16.",
+    ),
+    prefer_encoding: Optional[str] = typer.Option(
+        None, "--prefer-encoding",
+        help="Desempata cuando la detección da candidatos empatados de familias distintas "
+             "(p. ej. cp1252 frente a cp1250 en español). Solo se usa si está entre los empatados.",
+    ),
+    replace_char: Optional[List[str]] = typer.Option(
+        None, "--replace-char",
+        help="Sustitución DE=A (se puede repetir). Admite \\uXXXX y \\= para un '=' literal. "
+             "Nunca toca las marcas de tiempo. También se aplica a las letras incrustadas.",
+    ),
+    replace_map: Optional[Path] = typer.Option(
+        None, "--replace-map",
+        help="Archivo UTF-8 con una sustitución por línea (DE=A o DE<TAB>A; # para comentarios).",
+    ),
+    id3_encoding: Optional[Id3Encoding] = typer.Option(
+        None, "--id3-encoding",
+        help="Codificación de los frames de letra ID3 (USLT, SYLT, TXXX de letra): latin1, utf16 o utf8 "
+             "(utf8 solo en ID3v2.4; no se cambia la versión del tag).",
+    ),
+    on_unencodable: OnUnencodable = typer.Option(
+        OnUnencodable.skip, "--on-unencodable",
+        help="Si el destino no puede representar algún carácter: skip (omitir el archivo y listarlo, "
+             "por defecto) o error (detener todo antes de modificar nada). Nunca se sustituye por '?'.",
+    ),
+    allow_full_rewrite: bool = typer.Option(
+        False, "--allow-full-rewrite",
+        help="Permite reescribir el archivo de audio completo cuando la letra no cabe en el relleno "
+             "(p. ej. ID3 Latin-1 -> UTF-16) y siempre en Ogg/Opus. Por defecto se omiten.",
+    ),
+    only: Optional[List[str]] = typer.Option(
+        None, "--only", "-o", help="Limita a una carpeta (ruta) o álbum (nombre). Se puede repetir.",
+    ),
+    apply: bool = typer.Option(False, "--apply", help="Aplica los cambios. Sin esta opción solo se simula."),
+    diff: bool = typer.Option(False, "--diff", help="Muestra las diferencias línea por línea."),
+    limit: Optional[int] = typer.Option(
+        None, "--limit", "-l",
+        help="Máximo de canciones por lista en pantalla (0 = sin límite); igual que en normalize-lyrics.",
+    ),
+    include_hidden: bool = typer.Option(False, "--include-hidden",
+                                        help="Incluye carpetas y archivos ocultos (que empiezan con '.')."),
+    no_progress: bool = typer.Option(False, "--no-progress", help="No muestra el progreso."),
+    resume: Optional[Path] = typer.Option(
+        None, "--resume", help="Continúa una ejecución interrumpida de convert-lyrics (carpeta de respaldo).",
+    ),
+    verify: Verify = typer.Option(
+        Verify.auto, "--verify",
+        help="Verificación tras escribir en archivos de audio: auto (por defecto), full o quick.",
+    ),
+) -> None:
+    """Convierte codificación, saltos de línea y caracteres de las letras (con simulación y respaldo)."""
+    from choconostle.converter import LyricsConverter
+    from choconostle.textio import ReplaceRuleError, load_replace_map, parse_replace_rule
+
+    _safe_streams()
+    console = Console(highlight=False)
+    error_console = Console(stderr=True, highlight=False)
+    path = path.expanduser()
+    if not path.is_dir():
+        print_copyable(error_console, f"No es una carpeta: {path}", "red")
+        raise typer.Exit(code=2)
+    progress = _RunProgress(error_console, enabled=not no_progress and error_console.is_terminal)
+    if resume is not None:
+        _resume(path, resume.expanduser(), console, error_console, progress, limit, diff, "convert-lyrics")
+        return
+
+    try:
+        target = parse_target_encoding(to)
+        if target is None:
+            raise EncodingOptionError("--to keep no es válido en convert-lyrics: indica una codificación.")
+        for name in (source_encoding, prefer_encoding):
+            if name is not None and parse_target_encoding(name) is None:
+                raise EncodingOptionError("keep no es una codificación de origen.")
+        rules = [parse_replace_rule(value) for value in replace_char or []]
+        if replace_map is not None:
+            rules += load_replace_map(replace_map.expanduser())
+    except (EncodingOptionError, ReplaceRuleError, OSError) as exc:
+        print_copyable(error_console, str(exc), "red")
+        raise typer.Exit(code=2)
+
+    converter = LyricsConverter(
+        to, eol.value, source_encoding, prefer_encoding, rules,
+        id3_encoding.value if id3_encoding else None, on_unencodable.value, allow_full_rewrite,
+    )
+    _execute("convert-lyrics", converter, path, apply, diff, limit, only or [], include_hidden,
+             verify.value, console, error_console, progress)
+
+
 @app.command()
 def revert(
     folder: Path = typer.Argument(
@@ -438,7 +583,7 @@ def revert(
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Solo muestra qué se restauraría."),
 ) -> None:
-    """Restaura las letras originales desde una carpeta de respaldo de normalize-lyrics."""
+    """Restaura las letras originales desde una carpeta de respaldo (normalize-lyrics o convert-lyrics)."""
     _safe_streams()
     console = Console(highlight=False)
     error_console = Console(stderr=True, highlight=False)
