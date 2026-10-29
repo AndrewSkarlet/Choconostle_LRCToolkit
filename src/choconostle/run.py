@@ -86,7 +86,18 @@ _SPACE_ERRNOS = {errno.ENOSPC, getattr(errno, "EDQUOT", errno.ENOSPC)}
 _DEVICE_ERRNOS = {errno.EIO, errno.ENODEV, errno.ENXIO, getattr(errno, "ESTALE", errno.EIO),
                   errno.EROFS, getattr(errno, "ENOMEDIUM", errno.ENODEV)}
 _SPACE_WINERRORS = {39, 112}  # ERROR_HANDLE_DISK_FULL, ERROR_DISK_FULL
-_DEVICE_WINERRORS = {21, 1167, 1117, 483}  # no preparado, desconectado, E/S, error de dispositivo
+# Errores de Windows (OSError.winerror) que indican que la unidad se fue.
+# Un acceso denegado (5) NO está aquí: es un fallo de ese archivo.
+DEVICE_WINERRORS = {
+    15: "ERROR_INVALID_DRIVE",           # la letra de unidad ya no existe
+    21: "ERROR_NOT_READY",
+    55: "ERROR_DEV_NOT_EXIST",
+    121: "ERROR_SEM_TIMEOUT",            # la unidad dejó de responder
+    483: "ERROR_DEVICE_HARDWARE_ERROR",
+    1117: "ERROR_IO_DEVICE",
+    1128: "ERROR_DEVICE_REMOVED",
+    1167: "ERROR_DEVICE_NOT_CONNECTED",
+}
 
 
 def checkpoint(step: str, record: dict) -> None:
@@ -152,9 +163,10 @@ def fatal_kind(exc: BaseException, root: Path) -> str | None:
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         if isinstance(current, OSError):
-            if current.errno in _SPACE_ERRNOS or getattr(current, "winerror", None) in _SPACE_WINERRORS:
+            winerror = getattr(current, "winerror", None)
+            if winerror in _SPACE_WINERRORS or (winerror is None and current.errno in _SPACE_ERRNOS):
                 return "space"
-            if current.errno in _DEVICE_ERRNOS or getattr(current, "winerror", None) in _DEVICE_WINERRORS:
+            if winerror in DEVICE_WINERRORS or (winerror is None and current.errno in _DEVICE_ERRNOS):
                 return "device"
         current = current.__cause__ or current.__context__
     if not reachable(root):
@@ -162,10 +174,17 @@ def fatal_kind(exc: BaseException, root: Path) -> str | None:
     return None
 
 
-def reachable(root: Path) -> bool:
+def reachable(root: Path, backups: bool = True) -> bool:
+    """
+    True si la biblioteca (y, con backups=True, su carpeta de respaldos)
+    sigue accesible. Si desaparece la letra de unidad o el punto de
+    montaje de la tarjeta SD, es False.
+    """
     try:
-        return os.path.isdir(long_path(root)) and os.path.isdir(long_path(Path(root) / BACKUP_DIR_NAME))
-    except OSError:
+        if not os.path.isdir(long_path(root)):
+            return False
+        return not backups or os.path.isdir(long_path(Path(root) / BACKUP_DIR_NAME))
+    except (OSError, ValueError):
         return False
 
 
@@ -180,7 +199,8 @@ class Run:
         self.folder = Path(folder)
         path = self.folder / STATE_NAME
         if not path.is_file():
-            raise FileNotFoundError(f"No se encontró {STATE_NAME} en {folder}")
+            from choconostle.backup import BackupNotFound, not_found_message
+            raise BackupNotFound(not_found_message(self.folder))
         self.state = json.loads(path.read_text(encoding="utf-8"))
         if self.state.get("format") != FORMAT:
             raise ValueError(f"Formato de ejecución desconocido: {self.state.get('format')}")
@@ -497,6 +517,9 @@ def plan_library(run: Run, normalizer, root: Path, only: list[str] | None = None
 
     with open(long_path(run.folder / PLAN_NAME), "a", encoding="utf-8") as plan_file:
         for folder_scan in iter_folders(root, include_hidden, on_file, folders=walk):
+            if not reachable(root, backups=False):
+                raise StopRun("device", "La biblioteca dejó de estar accesible durante la planificación "
+                                        "(¿se desconectó la tarjeta SD?). No se modificó nada.")
             tracks, orphans = folder_scan.tracks, folder_scan.orphan_lyrics
             if albums:
                 for track in tracks:

@@ -267,6 +267,15 @@ def _more(console: Console, hidden: int, total: int | None = None, what: str = "
                       "Usa --limit 0 para ver la lista completa.", style="yellow")
 
 
+def print_copyable(console: Console, text: str, style: str | None = None) -> None:
+    """
+    Imprime una línea que el usuario puede copiar (rutas, comandos) sin que
+    Rich la parta al ancho de la terminal. Si es más larga que la ventana,
+    la terminal la muestra en varias filas, pero se copia como una sola línea.
+    """
+    console.print(Text(text, style=style or ""), soft_wrap=True)
+
+
 def _section(console: Console, title: str) -> None:
     console.print()
     console.rule(f"[bold]{title}[/bold]", align="left")
@@ -525,7 +534,7 @@ def print_run_report(
     console.print(f"Codificación de archivos .lrc/.txt: {options_state['encoding']}", markup=False)
     for option in options or []:
         console.print(option, markup=False)
-    console.print(Text(f"Biblioteca: {root}"))
+    print_copyable(console, f"Biblioteca: {root}")
 
     _section(console, "Resumen")
     table = Table(show_header=False, box=None, padding=(0, 2))
@@ -651,11 +660,9 @@ def print_run_report(
     console.print()
     if not applied:
         if changes:
-            console.print(
-                "Para aplicar los cambios, repite el comando con --apply. "
-                f"Antes se guardará un respaldo en {root / 'ChoconostleLRCTool_back'}.",
-                markup=False,
-            )
+            console.print("Para aplicar los cambios, repite el comando con --apply. Antes se guardará "
+                          "un respaldo en:", markup=False)
+            print_copyable(console, str(root / "ChoconostleLRCTool_back"))
         else:
             console.print("No hay nada que modificar.")
         return
@@ -666,9 +673,12 @@ def print_run_report(
         console.print(Text(f"SE DETUVO: {summary.stopped}", style="bold red"))
         console.print(Text("Los archivos marcados como aplicados están confirmados en el diario; "
                            "el resto no se modificó o se restauró."))
-        console.print(Text(f'Para continuar: choconostle normalize-lyrics "{root}" --resume "{run.folder}"'))
-    console.print(Text(f"Respaldo guardado en: {run.folder}"))
-    console.print(Text(f'Para deshacer: choconostle revert "{run.folder}"'))
+        console.print("Para continuar:")
+        print_copyable(console, f'choconostle normalize-lyrics "{root}" --resume "{run.folder}"')
+    console.print("Respaldo guardado en:")
+    print_copyable(console, str(run.folder))
+    console.print("Para deshacer:")
+    print_copyable(console, f'choconostle revert "{run.folder}"')
 
 
 def skipped_by_reason(changes: list) -> list[tuple[str, set]]:
@@ -688,7 +698,7 @@ def print_revert(results: list, folder: Path, console: Console | None = None,
     console = console or Console()
     title = "SIMULACIÓN (no se modificó nada)" if dry_run else "resultado"
     console.print(f"[bold]revert - {title}[/bold]")
-    console.print(Text(f"Respaldo: {folder}"))
+    print_copyable(console, f"Respaldo: {folder}")
     counts = Counter(result.status for result in results)
     table = Table(show_header=False, box=None, padding=(0, 2))
     table.add_column(style="bold")

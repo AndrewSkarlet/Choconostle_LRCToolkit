@@ -29,6 +29,13 @@
 - El reporte de `scan` ya no dice que `normalize-lyrics` no modifica las letras casi vacías.
 - Al restaurar un archivo tras una escritura fallida también se restaura su fecha de modificación.
 
+#### Correcciones tras la prueba en Windows
+- Desconexión en Windows: además de 21, 483, 1117 y 1167, se reconocen 15 (ERROR_INVALID_DRIVE), 55 (ERROR_DEV_NOT_EXIST), 121 (ERROR_SEM_TIMEOUT) y 1128 (ERROR_DEVICE_REMOVED). Cuando el error trae `winerror`, se decide solo por él. Así un acceso denegado (WinError 5) sigue siendo un fallo de ese archivo y no detiene la ejecución.
+- Si la unidad desaparece durante la planificación, la ejecución se detiene sin aplicar nada (código 3). Si desaparece antes del reporte final, se muestra un resumen con el comando para reanudar.
+- La prueba de desconexión ya no renombra la carpeta (en Windows falla con WinError 5): simula que toda operación sobre la biblioteca falla. Se prueba con EIO y con WinError 1167, cada código de Windows por separado, la desaparición de la letra de unidad, WinError 5 y la desconexión durante la planificación.
+- Las rutas y comandos para copiar se imprimen sin que Rich los parta en varias líneas.
+- `revert`: si no encuentra el respaldo, nombra `estado.json` (no `manifiesto.json`) y sugiere comprobar que la ruta esté en una sola línea. Con `--latest` acepta la carpeta de la biblioteca (o `ChoconostleLRCTool_back`) y usa el respaldo más reciente.
+
 #### Incompatibilidades
 - Las ejecuciones nuevas usan el formato 3 (`estado.json`, `plan.jsonl`, `diario.jsonl`) en lugar de `manifiesto.json`. `revert` sigue leyendo los formatos 1 y 2.
 - Un error de E/S (EIO) detiene toda la ejecución en lugar de marcar solo ese archivo como fallido.

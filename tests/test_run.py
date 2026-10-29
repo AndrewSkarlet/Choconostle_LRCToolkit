@@ -279,37 +279,173 @@ def test_disk_full_mid_byte_write_restores_and_stops(biblioteca, reference, orig
 
 
 # --------------------------------------------------------------------------
-# Desconexión de la unidad
+# Desconexión de la unidad (portable: no renombra carpetas)
 # --------------------------------------------------------------------------
 
-def test_device_disconnected_then_resume(biblioteca, reference, original, monkeypatch):
-    unplugged = biblioteca.with_name("desconectada")
-    calls = {"n": 0}
-    real = runs.write_file_atomic
+def win_error(code: int) -> OSError:
+    """OSError con winerror, igual en Windows y en Linux (donde se asigna a mano)."""
+    exc = OSError(errno.EINVAL, f"[WinError {code}] simulado", None, code)
+    if getattr(exc, "winerror", None) != code:
+        exc.winerror = code
+    return exc
 
-    def unplug(path, data):
-        calls["n"] += 1
-        if calls["n"] == 5:
-            os.rename(biblioteca, unplugged)  # la tarjeta SD desaparece
-            raise OSError(errno.EIO, "Input/output error")
-        real(path, data)
-    monkeypatch.setattr(runs, "write_file_atomic", unplug)
+
+def eio() -> OSError:
+    return OSError(errno.EIO, "Input/output error (simulado)")
+
+
+class Unplug:
+    """
+    Simula que la unidad de la biblioteca se desconecta: a partir de la
+    escritura número `after` sobre un archivo de la biblioteca (no del
+    respaldo), toda operación sobre rutas de la biblioteca (abrir, stat,
+    listar, escribir, reemplazar, borrar, espacio libre) falla con `error()`.
+    """
+
+    def __init__(self, monkeypatch, root: Path, after: int, error):
+        self.root = os.path.normcase(os.path.abspath(root))
+        self.backups = os.path.join(self.root, BACKUP_DIR_NAME)
+        self.after = after
+        self.error = error
+        self.writes = 0
+        self.unplugged = False
+        import builtins
+        import io
+        for module, name in [(builtins, "open"), (io, "open"), (os, "open"), (os, "stat"), (os, "lstat"),
+                             (os, "scandir"), (os, "listdir"), (os, "replace"), (os, "rename"),
+                             (os, "unlink"), (os, "remove"), (os, "utime"), (os, "mkdir"),
+                             (shutil, "disk_usage")]:
+            monkeypatch.setattr(module, name, self._wrap(getattr(module, name), name))
+
+    def _inside(self, path) -> bool:
+        if isinstance(path, int):
+            return False
+        try:
+            text = os.fspath(path)
+        except TypeError:
+            return False
+        if isinstance(text, bytes):
+            text = os.fsdecode(text)
+        text = text[4:] if text.startswith("\\\\?\\") else text
+        text = os.path.normcase(os.path.abspath(text))
+        return text == self.root or text.startswith(self.root + os.sep)
+
+    def _wrap(self, real, name):
+        def wrapper(*args, **kwargs):
+            paths = [arg for arg in args[:2] if not isinstance(arg, (int, dict))] if name in ("replace", "rename") \
+                else args[:1]
+            if any(self._inside(path) for path in paths):
+                if self.unplugged:
+                    raise self.error()
+                mode = args[1] if len(args) > 1 and isinstance(args[1], str) else kwargs.get("mode", "r")
+                writing = name in ("open",) and isinstance(mode, str) and any(c in mode for c in "wax+")
+                library_file = not self._inside_backups(paths[0])
+                if writing and library_file:
+                    self.writes += 1
+                    if self.writes >= self.after:
+                        self.unplugged = True
+                        raise self.error()
+            return real(*args, **kwargs)
+        return wrapper
+
+    def _inside_backups(self, path) -> bool:
+        text = os.path.normcase(os.path.abspath(os.fspath(path)))
+        return text.startswith(self.backups + os.sep)
+
+
+@pytest.mark.parametrize("error", [eio, lambda: win_error(1167)], ids=["EIO", "WinError1167"])
+def test_device_disconnected_then_resume(biblioteca, reference, original, monkeypatch, error):
+    unplug = Unplug(monkeypatch, biblioteca, after=5, error=error)
     args = ["normalize-lyrics", str(biblioteca), "--strip-headers", "--apply", "--allow-full-rewrite",
             "--no-progress", *sum((["--only", o] for o in ONLY), [])]
     result = runner.invoke(app, args, env={"COLUMNS": "200"})
+    assert unplug.unplugged
     assert result.exit_code == 3, result.output
-    assert "se desconectó" in result.output and "--resume" in result.output
-    monkeypatch.undo()
-    os.rename(unplugged, biblioteca)  # se vuelve a conectar
+    assert "se desconectó la tarjeta SD" in result.output
+    assert "--resume" in result.output
+    monkeypatch.undo()  # se vuelve a conectar
     folder = next((biblioteca / BACKUP_DIR_NAME).iterdir())
-    execution = runs.Run(folder)
-    _intents, done = execution.outcome()
-    assert len(done) == 4  # solo las que se confirmaron antes de desconectarse
+    _intents, done = runs.Run(folder).outcome()
+    assert len(done) == 4  # solo las confirmadas antes de la desconexión
     result = runner.invoke(app, ["normalize-lyrics", str(biblioteca), "--resume", str(folder), "--no-progress"])
     assert result.exit_code == 0, result.output
     assert files(biblioteca) == reference
     backup.revert(folder)
     assert files(biblioteca) == original
+
+
+def test_drive_letter_disappears(biblioteca, reference, monkeypatch):
+    """La letra de unidad (o el punto de montaje) desaparece: "no se encuentra la ruta"."""
+    normalizer, execution = start(biblioteca)
+    Unplug(monkeypatch, biblioteca, after=3, error=lambda: win_error(3))  # ERROR_PATH_NOT_FOUND
+    summary = runs.apply_run(execution, normalizer, biblioteca)
+    assert summary.stop_kind == "device"
+    monkeypatch.undo()
+    finish(biblioteca, normalizer, execution)
+    assert files(biblioteca) == reference
+
+
+@pytest.mark.parametrize("code", sorted(runs.DEVICE_WINERRORS))
+def test_windows_device_errors_stop_the_run(biblioteca, reference, monkeypatch, code):
+    assert runs.fatal_kind(win_error(code), biblioteca) == "device"
+    normalizer, execution = start(biblioteca)
+    calls = {"n": 0}
+    real = runs.write_file_atomic
+
+    def failing(path, data):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise win_error(code)
+        real(path, data)
+    monkeypatch.setattr(runs, "write_file_atomic", failing)
+    summary = runs.apply_run(execution, normalizer, biblioteca)
+    assert summary.stop_kind == "device" and summary.applied == 1
+    assert runs.Run(execution.folder).phase == runs.STATE_INTERRUPTED
+    monkeypatch.undo()
+    finish(biblioteca, normalizer, execution)
+    assert files(biblioteca) == reference
+
+
+def test_access_denied_is_not_a_disconnection(biblioteca, monkeypatch):
+    """WinError 5 (acceso denegado) es un fallo de ese archivo: la ejecución sigue."""
+    (biblioteca / BACKUP_DIR_NAME).mkdir()  # como durante una ejecución
+    assert runs.fatal_kind(win_error(5), biblioteca) is None
+    assert runs.fatal_kind(win_error(112), biblioteca) == "space"
+    calls = {"n": 0}
+    real = runs.write_file_atomic
+
+    def denied(path, data):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise win_error(5)
+        real(path, data)
+    monkeypatch.setattr(runs, "write_file_atomic", denied)
+    args = ["normalize-lyrics", str(biblioteca), "--strip-headers", "--apply", "--no-progress",
+            *sum((["--only", o] for o in ONLY), [])]
+    result = runner.invoke(app, args, env={"COLUMNS": "200"})
+    assert result.exit_code == 1, result.output  # un archivo falló; el resto se aplicó
+    folder = next(f for f in (biblioteca / BACKUP_DIR_NAME).iterdir() if f.is_dir())
+    execution = runs.Run(folder)
+    assert execution.phase == runs.STATE_COMPLETED
+    failed = [item for item in execution.manifest["items"] if item["status"] == "failed"]
+    assert len(failed) == 1 and "WinError 5" in failed[0]["error"]
+
+
+def test_disconnection_while_planning(biblioteca, original, monkeypatch):
+    real_iter = runs.iter_folders
+
+    def iter_and_unplug(*args, **kwargs):
+        for number, folder in enumerate(real_iter(*args, **kwargs)):
+            if number == 3:
+                monkeypatch.setattr(runs, "reachable", lambda *a, **k: False)
+            yield folder
+    monkeypatch.setattr(runs, "iter_folders", iter_and_unplug)
+    result = runner.invoke(app, ["normalize-lyrics", str(biblioteca), "--strip-headers", "--apply",
+                                 "--no-progress"], env={"COLUMNS": "200"})
+    assert result.exit_code == 3 and "durante la planificación" in result.output
+    monkeypatch.undo()
+    assert files(biblioteca) == original
+    assert not list((biblioteca / BACKUP_DIR_NAME).iterdir())  # sin respaldo: no se aplicó nada
 
 
 # --------------------------------------------------------------------------
@@ -463,3 +599,59 @@ def test_scan_text_about_nearly_empty(tmp_path):
     gen.song(library, "01", "[ar:x]\n[00:00.00]Instrumental\n")
     result = runner.invoke(app, ["scan", str(library), "--no-progress"], env={"COLUMNS": "200"})
     assert "las procesa con un aviso" in result.output and "no las modifica" not in result.output
+
+
+# --------------------------------------------------------------------------
+# Rutas largas en los mensajes y revert --latest
+# --------------------------------------------------------------------------
+
+def test_copyable_lines_are_not_wrapped(tmp_path):
+    gen = load_generator()
+    library = tmp_path.joinpath(*[f"Carpeta con un nombre bastante largo número {n}" for n in range(6)])
+    gen.song(library / "Álbum", "01 Canción", gen.synced(gen.ES, gen.HDR_STD))
+    result = runner.invoke(app, ["normalize-lyrics", str(library), "--strip-headers", "--apply",
+                                 "--no-progress"], env={"COLUMNS": "60"})
+    assert result.exit_code == 0, result.output
+    folder = next((library / BACKUP_DIR_NAME).iterdir())
+    lines = result.output.splitlines()
+    assert len(f'choconostle revert "{folder}"') > 300
+    assert f'choconostle revert "{folder}"' in lines  # una sola línea, aunque la terminal mida 60
+    assert str(folder) in lines
+
+
+def test_revert_not_found_message(tmp_path):
+    missing = tmp_path / "ChoconostleLRCTool_back" / "2026-10-28_03-51"
+    result = runner.invoke(app, ["revert", str(missing)], env={"COLUMNS": "60"})
+    assert result.exit_code == 2
+    assert "No se encontró estado.json" in result.output
+    assert "en una sola línea" in result.output
+    assert str(missing) in result.output.replace("\n", "") and str(missing) in result.output
+
+
+def test_revert_library_with_latest(biblioteca, original):
+    first = ["normalize-lyrics", str(biblioteca), "--strip-headers", "--apply", "--no-progress",
+             "--only", "03_cabeceras"]
+    second = ["normalize-lyrics", str(biblioteca), "--strip-headers", "--apply", "--no-progress",
+              "--only", "02_saltos_de_linea"]
+    assert runner.invoke(app, first).exit_code == 0
+    import time
+    time.sleep(1.1)  # carpetas con fecha distinta
+    assert runner.invoke(app, second).exit_code == 0
+    after_both = files(biblioteca)
+
+    result = runner.invoke(app, ["revert", str(biblioteca)], env={"COLUMNS": "200"})
+    assert result.exit_code == 2 and "--latest" in result.output and "2 respaldos" in result.output
+    assert files(biblioteca) == after_both
+
+    result = runner.invoke(app, ["revert", str(biblioteca), "--latest"], env={"COLUMNS": "200"})
+    assert result.exit_code == 0, result.output
+    assert "Respaldo más reciente" in result.output
+    now = files(biblioteca)
+    for path, data in now.items():
+        if path.startswith("02_saltos_de_linea"):
+            assert data == original[path], path  # se revirtió la segunda ejecución
+        elif path.startswith("03_cabeceras"):
+            assert data == after_both[path], path  # la primera sigue aplicada
+    # También desde la carpeta de respaldos.
+    result = runner.invoke(app, ["revert", str(biblioteca / BACKUP_DIR_NAME), "--latest", "--dry-run"])
+    assert result.exit_code == 0 and "Ya estaban como el original" in result.output

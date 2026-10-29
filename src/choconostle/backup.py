@@ -273,13 +273,64 @@ def _is_run(folder: Path) -> bool:
     return (Path(folder) / "estado.json").is_file()
 
 
+class BackupNotFound(FileNotFoundError):
+    """La ruta no es una carpeta de respaldo (o no hay respaldos)."""
+
+
+def not_found_message(folder: Path) -> str:
+    return (f"No se encontró estado.json (ni manifiesto.json de versiones anteriores) en: {folder}\n"
+            "Comprueba que la ruta esté completa y en una sola línea: las rutas largas pueden partirse "
+            "al copiarlas de la terminal. También puedes indicar la carpeta de la biblioteca con --latest "
+            "para usar el respaldo más reciente.")
+
+
+def is_backup_folder(folder: Path) -> bool:
+    folder = Path(folder)
+    return _is_run(folder) or (folder / MANIFEST_NAME).is_file()
+
+
+def backup_date(folder: Path) -> str:
+    """Fecha de creación (ISO) de un respaldo, o el nombre de la carpeta si no se puede leer."""
+    for name in ("estado.json", MANIFEST_NAME):
+        path = Path(folder) / name
+        if path.is_file():
+            try:
+                return json.loads(path.read_text(encoding="utf-8")).get("created_at") or folder.name
+            except (OSError, json.JSONDecodeError):
+                break
+    return Path(folder).name
+
+
+def resolve_backup(path: Path, latest: bool = False) -> Path:
+    """
+    Carpeta de respaldo a partir de lo que indicó el usuario: la carpeta
+    de un respaldo, o (con latest=True) la biblioteca o su carpeta
+    ChoconostleLRCTool_back, de la que se toma el respaldo más reciente.
+    """
+    path = Path(path)
+    if is_backup_folder(path):
+        return path
+    base = path if path.name == BACKUP_DIR_NAME else path / BACKUP_DIR_NAME
+    if base.is_dir():
+        found = sorted((folder for folder in base.iterdir() if folder.is_dir() and is_backup_folder(folder)),
+                       key=lambda folder: (backup_date(folder), folder.name))
+        if not found:
+            raise BackupNotFound(f"No hay respaldos en: {base}")
+        if latest:
+            return found[-1]
+        recent = "\n".join(f"  {folder}" for folder in found[-5:])
+        raise BackupNotFound(f"{path} no es un respaldo sino una carpeta con {len(found)} respaldos. "
+                             f"Indica uno, o usa --latest para el más reciente. Los últimos:\n{recent}")
+    raise BackupNotFound(not_found_message(path))
+
+
 def load_manifest(folder: Path) -> dict:
     if _is_run(folder):
         from choconostle.run import Run
         return Run(folder).manifest
     path = Path(folder) / MANIFEST_NAME
     if not path.is_file():
-        raise FileNotFoundError(f"No se encontró {MANIFEST_NAME} en {folder}")
+        raise BackupNotFound(not_found_message(folder))
     return json.loads(path.read_text(encoding="utf-8"))
 
 

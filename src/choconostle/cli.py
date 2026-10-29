@@ -40,7 +40,7 @@ from choconostle.normalizer import (
 )
 from choconostle.rawtags.writer import VERIFY_FULL, VERIFY_QUICK
 from choconostle.report import (
-    build_report, print_report, print_revert, print_run_report, write_json,
+    build_report, print_copyable, print_report, print_revert, print_run_report, write_json,
 )
 from choconostle.scanner import LibraryScan, count_files, scan_directory
 from choconostle.textio import EncodingOptionError, parse_target_encoding
@@ -134,7 +134,7 @@ def scan(
 
     path = path.expanduser()
     if not path.is_dir():
-        error_console.print(f"No es una carpeta: {path}", style="red", markup=False)
+        print_copyable(error_console, f"No es una carpeta: {path}", "red")
         raise typer.Exit(code=2)
 
     result = _scan(path, include_hidden, no_progress, error_console)
@@ -221,7 +221,7 @@ def normalize_lyrics(
 
     path = path.expanduser()
     if not path.is_dir():
-        error_console.print(f"No es una carpeta: {path}", style="red", markup=False)
+        print_copyable(error_console, f"No es una carpeta: {path}", "red")
         raise typer.Exit(code=2)
     show_limit = (0 if diff or apply or resume else 20) if limit is None else limit
     progress = _RunProgress(error_console, enabled=not no_progress and error_console.is_terminal)
@@ -242,7 +242,7 @@ def normalize_lyrics(
 
     pending = pending_sessions(path)
     if pending:
-        error_console.print(str(PendingWritesError(pending)), style="yellow", markup=False)
+        print_copyable(error_console, str(PendingWritesError(pending)), "yellow")
         if apply:
             raise typer.Exit(code=2)
 
@@ -256,7 +256,13 @@ def normalize_lyrics(
     keep_folder = apply
     try:
         progress.start_plan(count_files(path, include_hidden))
-        totals = runs.plan_library(execution, normalizer, path, only or [], include_hidden, progress)
+        try:
+            totals = runs.plan_library(execution, normalizer, path, only or [], include_hidden, progress)
+        except runs.StopRun as stop:
+            progress.stop()
+            keep_folder = False  # no se aplicó nada
+            print_copyable(error_console, f"SE DETUVO: {stop}", "red")
+            raise typer.Exit(code=3)
         progress.stop()
         if execution.state.get("missing_albums"):
             names = ", ".join(execution.state["missing_albums"])
@@ -273,20 +279,19 @@ def normalize_lyrics(
                 summary = runs.apply_run(execution, normalizer, path, progress, verify=verify.value)
             except runs.InsufficientSpace as exc:
                 progress.stop()
-                error_console.print(str(exc), style="red", markup=False)
-                error_console.print(f'Cuando haya espacio: choconostle normalize-lyrics "{path}" '
-                                    f'--resume "{execution.folder}"', markup=False)
+                print_copyable(error_console, str(exc), "red")
+                error_console.print("Cuando haya espacio:")
+                print_copyable(error_console, f'choconostle normalize-lyrics "{path}" --resume "{execution.folder}"')
                 raise typer.Exit(code=2)
             except KeyboardInterrupt:
                 progress.stop()
-                error_console.print(f'Interrumpido. Para continuar: choconostle normalize-lyrics "{path}" '
-                                    f'--resume "{execution.folder}"', style="yellow", markup=False)
+                error_console.print("Interrumpido. Para continuar:", style="yellow")
+                print_copyable(error_console, f'choconostle normalize-lyrics "{path}" --resume "{execution.folder}"')
                 raise typer.Exit(code=130)
             finally:
                 progress.stop()
-        print_run_report(execution, console=console, limit=show_limit, show_diff=diff, applied=apply,
-                         summary=summary or (runs.ApplySummary() if apply else None),
-                         options=_option_lines(execution.state["options"]))
+        _report(execution, console, error_console, path, show_limit, diff, apply,
+                summary or (runs.ApplySummary() if apply else None), _option_lines(execution.state["options"]))
         _exit_for(summary)
     finally:
         if not keep_folder:
@@ -306,6 +311,25 @@ def _option_lines(options: dict) -> list[str]:
     return lines
 
 
+def _report(execution, console, error_console, path, limit, diff, applied, summary, options) -> None:
+    """
+    Reporte leído del plan en disco. Si la unidad ya no está (tarjeta SD
+    desconectada), se muestra solo lo que se sabe en memoria.
+    """
+    try:
+        print_run_report(execution, console=console, limit=limit, show_diff=diff, applied=applied,
+                         summary=summary, options=options)
+    except OSError:
+        if summary is None or not summary.stopped:
+            raise
+        print_copyable(error_console, f"SE DETUVO: {summary.stopped}", "red")
+        error_console.print(f"Confirmadas antes de detenerse: {summary.applied} aplicadas, {summary.failed} con error. "
+                            "El resto no se modificó o se restauró; el diario en la tarjeta dice qué terminó.",
+                            markup=False)
+        error_console.print("Cuando vuelvas a conectar la unidad, para continuar:")
+        print_copyable(error_console, f'choconostle normalize-lyrics "{path}" --resume "{execution.folder}"')
+
+
 def _exit_for(summary) -> None:
     if summary is None:
         return
@@ -319,7 +343,7 @@ def _resume(path, folder, console, error_console, progress, show_limit, diff) ->
     try:
         execution = runs.Run(folder)
     except (FileNotFoundError, ValueError) as exc:
-        error_console.print(f"No se puede reanudar: {exc}", style="red", markup=False)
+        print_copyable(error_console, f"No se puede reanudar: {exc}", "red")
         raise typer.Exit(code=2)
     options = execution.state["options"]
     normalizer = LyricsNormalizer.from_options(options)
@@ -327,7 +351,7 @@ def _resume(path, folder, console, error_console, progress, show_limit, diff) ->
     if problems:
         error_console.print("No se puede reanudar con seguridad; no se modificó nada:", style="red")
         for problem in problems:
-            error_console.print(f"  - {problem}", style="red", markup=False)
+            print_copyable(error_console, f"  - {problem}", "red")
         raise typer.Exit(code=2)
     _intents, done = execution.outcome()
     try:
@@ -335,12 +359,12 @@ def _resume(path, folder, console, error_console, progress, show_limit, diff) ->
         summary = runs.apply_run(execution, normalizer, path, progress, resume=True,
                                  verify=options.get("verify", "full"))
     except runs.InsufficientSpace as exc:
-        error_console.print(str(exc), style="red", markup=False)
+        print_copyable(error_console, str(exc), "red")
         raise typer.Exit(code=2)
     finally:
         progress.stop()
-    print_run_report(execution, console=console, limit=show_limit, show_diff=diff, applied=True,
-                     summary=summary, options=_option_lines(options) + ["Reanudada"])
+    _report(execution, console, error_console, path, show_limit, diff, True, summary,
+            _option_lines(options) + ["Reanudada"])
     _exit_for(summary)
 
 
@@ -392,7 +416,12 @@ class _RunProgress:
 @app.command()
 def revert(
     folder: Path = typer.Argument(
-        ..., help="Carpeta de respaldo: <biblioteca>/ChoconostleLRCTool_back/<fecha-hora>."),
+        ..., help="Carpeta de respaldo (<biblioteca>/ChoconostleLRCTool_back/<fecha-hora>), "
+                  "o la carpeta de la biblioteca con --latest."),
+    latest: bool = typer.Option(
+        False, "--latest",
+        help="Si se indica la biblioteca (o su carpeta ChoconostleLRCTool_back), usa el respaldo más reciente.",
+    ),
     force: bool = typer.Option(
         False, "--force",
         help="Restaura también las letras que cambiaron después de normalizarlas.",
@@ -403,11 +432,14 @@ def revert(
     _safe_streams()
     console = Console(highlight=False)
     error_console = Console(stderr=True, highlight=False)
-    folder = folder.expanduser()
     try:
+        folder = backup.resolve_backup(folder.expanduser(), latest=latest)
+        if latest:
+            console.print("Respaldo más reciente:")
+            print_copyable(console, str(folder))
         results = backup.revert(folder, force=force, dry_run=dry_run)
     except (FileNotFoundError, ValueError, KeyError) as exc:
-        error_console.print(f"No se puede revertir: {exc}", style="red", markup=False)
+        print_copyable(error_console, f"No se puede revertir: {exc}", "red")
         raise typer.Exit(code=2)
     print_revert(results, folder, console=console, dry_run=dry_run)
     if any(result.status in (backup.REVERT_CONFLICT, backup.REVERT_ERROR) for result in results):
@@ -426,7 +458,7 @@ def recover(
     try:
         results = backup.recover_session(folder.expanduser())
     except (FileNotFoundError, ValueError, KeyError) as exc:
-        error_console.print(f"No se puede recuperar: {exc}", style="red", markup=False)
+        print_copyable(error_console, f"No se puede recuperar: {exc}", "red")
         raise typer.Exit(code=2)
     if not results:
         console.print("No hay escrituras interrumpidas en este respaldo.")
@@ -458,7 +490,7 @@ def clean_backups(
     remove, keep = runs.clean_backups(path, older_than, apply=apply)
     title = "BORRADOS" if apply else "SIMULACIÓN (no se borró nada)"
     console.print(f"[bold]clean-backups - {title}[/bold]")
-    console.print(Text(f"Respaldos de más de {older_than} días en {path / 'ChoconostleLRCTool_back'}"))
+    print_copyable(console, f"Respaldos de más de {older_than} días en {path / 'ChoconostleLRCTool_back'}")
     console.print()
     label = "Borrados" if apply else "Se borrarían"
     console.print(f"{label} ({len(remove)}, {format_size(sum(i.size for i in remove))}):", markup=False)

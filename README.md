@@ -97,6 +97,7 @@ choconostle normalize-lyrics ~/Música --strip-headers --apply
 
 # 3. Deshacer, si hace falta
 choconostle revert ~/Música/ChoconostleLRCTool_back/2026-10-15_20-30-00
+choconostle revert ~/Música --latest        # el respaldo más reciente de la biblioteca
 
 # Si la ejecución se detuvo (sin espacio, tarjeta SD desconectada, Ctrl+C...)
 choconostle normalize-lyrics ~/Música --resume ~/Música/ChoconostleLRCTool_back/2026-10-15_20-30-00
@@ -221,7 +222,20 @@ En la terminal se ven los archivos procesados, los cambios, los errores, el tiem
 
 **Espacio libre.** Antes de aplicar se calcula el espacio necesario: copias de respaldo y parches, más el temporal más grande (una reescritura completa necesita el tamaño del archivo), más un margen de 16 MB. Si no hay suficiente, no se modifica nada. Si el disco se llena a mitad de ejecución, el archivo en curso se restaura y la ejecución se detiene.
 
-**Desconexión de la tarjeta SD.** Un error de E/S, o que desaparezcan la biblioteca o su carpeta de respaldo, detiene la ejecución en seguida. Solo cuentan como aplicados los archivos confirmados en el diario.
+**Desconexión de la tarjeta SD.** La ejecución se detiene en seguida (código de salida 3) cuando:
+- hay un error de dispositivo: EIO, ENODEV, ENXIO, ESTALE, EROFS o ENOMEDIUM en Linux, macOS y Android;
+- Windows devuelve uno de estos `winerror`:
+  - 15 ERROR_INVALID_DRIVE;
+  - 21 ERROR_NOT_READY;
+  - 55 ERROR_DEV_NOT_EXIST;
+  - 121 ERROR_SEM_TIMEOUT;
+  - 483 ERROR_DEVICE_HARDWARE_ERROR;
+  - 1117 ERROR_IO_DEVICE;
+  - 1128 ERROR_DEVICE_REMOVED;
+  - 1167 ERROR_DEVICE_NOT_CONNECTED;
+- desaparecen la letra de unidad, el punto de montaje o la carpeta de respaldo.
+
+Solo cuentan como aplicados los archivos confirmados en el diario. Si la unidad desaparece durante la planificación, no se modifica nada. Un **acceso denegado** (WinError 5, EACCES) no se trata como desconexión: es un fallo de ese archivo y la ejecución sigue.
 
 **`--resume CARPETA`** continúa una ejecución detenida con las opciones guardadas. Antes de continuar comprueba que todo es coherente; si encuentra algo raro, se detiene, explica el motivo y no modifica nada. Comprueba que:
 - la ejecución no esté completada y su planificación haya terminado;
@@ -280,6 +294,10 @@ Cada entrada pasa por estos pasos, y una interrupción en cualquiera de ellos se
 - `--dry-run` muestra qué restauraría sin cambiar nada.
 - Revertir dos veces no hace nada la segunda vez.
 - Los respaldos de versiones anteriores (manifiesto versión 1 y 2) se siguen pudiendo revertir.
+- `choconostle revert <biblioteca> --latest` usa el respaldo más reciente. También acepta la carpeta `ChoconostleLRCTool_back`. Sin `--latest`, lista los últimos respaldos para elegir.
+- Si la carpeta no es un respaldo, el mensaje indica qué archivo se buscaba (`estado.json`, o `manifiesto.json` en versiones anteriores) y recuerda comprobar que la ruta esté completa y en una sola línea.
+
+Las rutas y comandos que hay que copiar («Para deshacer», «Para continuar», «Respaldo guardado en») se imprimen **sin saltos de línea**, aunque sean más largos que la terminal. La terminal los muestra en varias filas, pero se copian como una sola línea.
 
 **Varias letras del mismo tipo** en un archivo (dos `USLT`, dos `LYRICS`, valores de un `TXXX`) se muestran con etiquetas distintas («USLT [eng]», «USLT [spa]», «LYRICS #1», «LYRICS #2»). Cada una tiene su propio diff, respaldo y reversión.
 
