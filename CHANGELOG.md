@@ -19,6 +19,8 @@
 
 #### Cambiado
 - La ejecución (`run.py`), el reporte y la CLI son comunes a los dos comandos (`_execute`, `processor_for`). `--resume` comprueba que la ejecución sea del mismo comando.
+- Con `--to` UTF-16 o UTF-32, el reporte y cada archivo afectado avisan de que casi ningún reproductor lee letras en esas codificaciones.
+- Documentado: las sustituciones también se aplican a las cabeceras (decisión aprobada), y la lista de funciones adicionales no pedidas (`--to` con cualquier códec, `recover`, `tools/medir_verificacion.py`).
 
 ### Etapa 3: bibliotecas grandes, reanudación y limpieza
 

@@ -505,6 +505,7 @@ def convert_option_lines(options: dict) -> list[str]:
     from choconostle.textio import describe_rule, encoding_label, parse_target_encoding
     target = parse_target_encoding(options["to"])
     eol = {"lf": "LF", "crlf": "CRLF", "keep": "se conservan"}[options["eol"]]
+    from choconostle.converter import WIDE_UNICODE_WARNING, wide_unicode
     lines = [f"Archivos .lrc/.txt: {target.label}; saltos de línea: {eol}",
              "Codificación de origen: " + (f"{encoding_label(options['source_encoding'])} (--source-encoding, "
                                            "para archivos de 8 bits)" if options["source_encoding"]
@@ -519,6 +520,8 @@ def convert_option_lines(options: dict) -> list[str]:
     if not rules and not options.get("id3_encoding"):
         lines.append("Letras incrustadas: no se tocan (solo cambian con --replace-char o --id3-encoding)")
     lines.append(f"Caracteres que no caben en el destino: {'omitir el archivo' if options['on_unencodable'] == 'skip' else 'detener todo'}")
+    if wide_unicode(target.codec):
+        lines.append(f"AVISO: {WIDE_UNICODE_WARNING}")
     return lines
 
 

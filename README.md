@@ -358,9 +358,17 @@ Si no, se omite y se lista con los candidatos. En `--diff` y en la lista de camb
 **Nunca se sustituyen caracteres por `?`.** Si el destino (`--to` o `--id3-encoding latin1`) no puede representar algún carácter, el archivo se omite y se lista con los caracteres que faltan. Con `--on-unencodable error`, la ejecución se detiene antes de aplicar nada.
 
 **Sustituciones.**
-- Se aplican en el orden indicado y **nunca tocan las marcas de tiempo** `[mm:ss.xx]` ni `<mm:ss.xx>`. Las cabeceras (`[ti:...]`) sí, porque son texto.
+- Se aplican en el orden indicado y **nunca tocan las marcas de tiempo** `[mm:ss.xx]` ni `<mm:ss.xx>`.
+- **También se aplican a las cabeceras** (`[ti:Canción]` pasa a `[ti:Cancion]` con `ó=o`), porque son texto de la letra. Es intencional.
 - El destino no puede contener `[`, `]`, `<`, `>` ni saltos de línea, para no crear marcas de tiempo ni partir líneas.
 - Cada regla se registra con la cantidad de sustituciones que hizo en cada letra.
+
+**Destino UTF-16 o UTF-32.** Se puede pedir (`--to utf-16`, `utf-16-le`, `utf-32`...), pero el encabezado del reporte y cada archivo afectado muestran un aviso: casi ningún reproductor lee letras `.lrc`/`.txt` en esas codificaciones. Se recomienda UTF-8.
+
+**Funciones adicionales que no estaban en la especificación:**
+- `--to` acepta cualquier códec de texto de Python, además de los pedidos: UTF-16 y UTF-32 en cualquier orden de bytes (con el aviso anterior), Latin-1, ISO-8859-x, Big5, etc.
+- El comando `recover`, para resolver escrituras interrumpidas sin continuar la ejecución (`--resume` ya lo hace al reanudar).
+- `tools/medir_verificacion.py`, para medir el costo de `--verify`.
 
 **`--id3-encoding`.**
 - Solo se rehacen los frames de letra (codificación, descripción y textos). Los demás frames quedan idénticos byte a byte.

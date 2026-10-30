@@ -54,6 +54,15 @@ ID3_ENCODINGS = {"latin1": 0, "utf16": 1, "utf8": 3}
 ID3_ENCODING_NAMES = {0: "Latin-1", 1: "UTF-16", 2: "UTF-16 BE", 3: "UTF-8"}
 
 
+WIDE_UNICODE_WARNING = ("Destino UTF-16/UTF-32: casi ningún reproductor lee letras .lrc/.txt en esa "
+                        "codificación; se recomienda UTF-8.")
+
+
+def wide_unicode(codec: str) -> bool:
+    """True para UTF-16 y UTF-32 (cualquier orden de bytes)."""
+    return codec.replace("_", "-").lower().startswith(("utf-16", "utf-32"))
+
+
 class ConversionAbort(Exception):
     """--on-unencodable error: un archivo no se puede convertir; no se aplica nada."""
 
@@ -200,6 +209,8 @@ class LyricsConverter:
 
         change.new_text = new_text
         change.new_bytes = new_bytes
+        if wide_unicode(self.target.codec):
+            change.warnings.append(WIDE_UNICODE_WARNING)
         change.details = self._file_details(data, text, new_text, counts)
         change.status = STATUS_CHANGE if new_bytes != data else STATUS_UNCHANGED
         if change.status == STATUS_UNCHANGED:

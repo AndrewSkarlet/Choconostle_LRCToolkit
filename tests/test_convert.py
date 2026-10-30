@@ -298,3 +298,12 @@ def test_revert_latest_after_convert(biblioteca):
     result = runner.invoke(app, ["revert", str(biblioteca), "--latest"])
     assert result.exit_code == 0, result.output
     assert files(biblioteca) == before
+
+
+@pytest.mark.parametrize("target", ["utf-16", "utf-16-le", "utf_32"])
+def test_wide_unicode_target_warns(biblioteca, target):
+    result = convert(biblioteca, "--to", target, "--diff", "--only", CODIF, apply=False)
+    assert result.exit_code == 0, result.output
+    assert "AVISO: Destino UTF-16/UTF-32" in result.output
+    assert "aviso: Destino UTF-16/UTF-32: casi ningún reproductor" in result.output
+    assert "Destino UTF-16" not in convert(biblioteca, "--only", CODIF, apply=False).output
