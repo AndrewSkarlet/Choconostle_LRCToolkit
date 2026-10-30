@@ -26,7 +26,7 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -258,6 +258,21 @@ class RevertResult:
     item: dict
     status: str
     message: str = ""
+    exc: BaseException | None = field(default=None, compare=False, repr=False)
+    """Excepción original de un error (para distinguir una desconexión de un fallo de ese archivo)."""
+
+
+class RevertStopped(Exception):
+    """revert se detuvo (unidad desconectada, sin espacio, restauración fallida); se puede repetir."""
+
+    def __init__(self, results: list, kind: str, message: str):
+        self.results = results
+        self.kind = kind
+        super().__init__(message)
+
+
+class RevertNoSpace(Exception):
+    """No hay espacio libre suficiente para revertir; no se tocó nada."""
 
 
 def _library_root(folder: Path, manifest: dict) -> Path:
@@ -381,7 +396,7 @@ def _revert_file(item: dict, folder: Path, root: Path, force: bool, dry_run: boo
     try:
         original = (folder / item["original_copy"]).read_bytes()
     except OSError as exc:
-        return RevertResult(item, REVERT_ERROR, f"No se pudo leer la copia original: {exc}")
+        return RevertResult(item, REVERT_ERROR, f"No se pudo leer la copia original: {exc}", exc)
     if sha256(original) != item["original_sha256"]:
         return RevertResult(item, REVERT_ERROR, "La copia original del respaldo está dañada.")
 
@@ -390,7 +405,7 @@ def _revert_file(item: dict, folder: Path, root: Path, force: bool, dry_run: boo
     except FileNotFoundError:
         current = None
     except OSError as exc:
-        return RevertResult(item, REVERT_ERROR, f"No se pudo leer: {exc}")
+        return RevertResult(item, REVERT_ERROR, f"No se pudo leer: {exc}", exc)
 
     if current is not None and sha256(current) == item["original_sha256"]:
         return RevertResult(item, REVERT_ALREADY, "Ya está como el original.")
@@ -407,7 +422,7 @@ def _revert_file(item: dict, folder: Path, root: Path, force: bool, dry_run: boo
         if item.get("original_mtime"):
             os.utime(target, (item["original_mtime"], item["original_mtime"]))
     except OSError as exc:
-        return RevertResult(item, REVERT_ERROR, f"No se pudo escribir: {exc}")
+        return RevertResult(item, REVERT_ERROR, f"No se pudo escribir: {exc}", exc)
     return RevertResult(item, REVERT_RESTORED)
 
 
@@ -415,8 +430,8 @@ def _revert_edit(record: dict, items: list[dict], folder: Path, root: Path, dry_
     """Deshace una edición byte a byte (o una reescritura Ogg) de un archivo de audio."""
     path = root / record["path"]
 
-    def all_items(status, message=""):
-        return [RevertResult(item, status, message) for item in items]
+    def all_items(status, message="", exc=None):
+        return [RevertResult(item, status, message, exc) for item in items]
 
     if record["status"] != ITEM_APPLIED:
         return all_items(REVERT_ALREADY, "No se había aplicado.")
@@ -454,9 +469,9 @@ def _revert_edit(record: dict, items: list[dict], folder: Path, root: Path, dry_
                    file_signature(path), record["path"])
         _restore_mtime(path, record)
     except (Unsupported, ChangedError, WriteError, OSError, ValueError, KeyError) as exc:
-        return all_items(REVERT_ERROR, f"No se pudo restaurar: {exc}")
+        return all_items(REVERT_ERROR, f"No se pudo restaurar: {exc}", exc)
     except RestoreError as exc:
-        return all_items(REVERT_ERROR, f"ERROR GRAVE: {exc}")
+        return all_items(REVERT_ERROR, f"ERROR GRAVE: {exc}", exc)
     return all_items(REVERT_RESTORED)
 
 

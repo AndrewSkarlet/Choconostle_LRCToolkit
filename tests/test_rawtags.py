@@ -339,7 +339,7 @@ def _make(gen, lyrics, root: Path, kind: str) -> Path:
 
 @needs_ffmpeg
 @pytest.mark.parametrize("kind", ["mp3", "flac", "wv", "m4a"])
-def test_crash_mid_write_then_recover(gen, lyrics, tmp_path, monkeypatch, kind):
+def test_crash_mid_write_then_recover(gen, lyrics, tmp_path, monkeypatch, kind, paths_mode):
     root = tmp_path / "lib"
     path = _make(gen, lyrics, root, kind)
     original = path.read_bytes()
@@ -418,7 +418,7 @@ def test_io_error_mid_write_restores_immediately(gen, lyrics, tmp_path, monkeypa
 
 
 @needs_ffmpeg
-def test_revert_conflict_when_tags_changed(gen, lyrics, tmp_path):
+def test_revert_conflict_when_tags_changed(gen, lyrics, tmp_path, paths_mode):
     root = tmp_path / "lib"
     path = _make(gen, lyrics, root, "flac")
     session, _ = apply(root)

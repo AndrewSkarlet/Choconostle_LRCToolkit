@@ -26,11 +26,6 @@ from test_run import PATH_MODES, Unplug, eio, files, runner, win_error
 CODIF = "01_codificaciones"
 
 
-@pytest.fixture(scope="module")
-def original(casos):
-    return files(casos)
-
-
 def plan(root: Path, **options):
     converter = LyricsConverter(**options)
     scan = scan_directory(root)

@@ -64,22 +64,6 @@ def finish(root: Path, normalizer, execution):
     return execution
 
 
-@pytest.fixture(scope="module")
-def original(casos):
-    return files(casos)
-
-
-@pytest.fixture(scope="module")
-def reference(casos, tmp_path_factory):
-    """Estado de la biblioteca tras aplicar sin interrupciones."""
-    root = tmp_path_factory.mktemp("ref") / "lib"
-    shutil.copytree(casos, root)
-    normalizer, execution = start(root)
-    summary = runs.apply_run(execution, normalizer, root)
-    assert summary.stopped is None and summary.failed == 0
-    return files(root)
-
-
 def crash_at(monkeypatch, step: str, target: str):
     fired = {"done": False}
 
@@ -124,7 +108,7 @@ def test_simulation_leaves_nothing(biblioteca, original):
 
 @pytest.mark.parametrize("kind", list(TARGETS))
 @pytest.mark.parametrize("step", ["start", "backup", "intent", "written", "done"])
-def test_crash_at_each_step_then_resume(biblioteca, reference, original, monkeypatch, kind, step):
+def test_crash_at_each_step_then_resume(biblioteca, reference, original, monkeypatch, kind, step, paths_mode):
     normalizer, execution = start(biblioteca)
     fired = crash_at(monkeypatch, step, TARGETS[kind])
     with pytest.raises(Crash):
@@ -140,7 +124,7 @@ def test_crash_at_each_step_then_resume(biblioteca, reference, original, monkeyp
 
 
 @pytest.mark.parametrize("kind", ["mp3", "flac", "m4a"])
-def test_crash_mid_byte_write_then_resume(biblioteca, reference, original, monkeypatch, kind):
+def test_crash_mid_byte_write_then_resume(biblioteca, reference, original, monkeypatch, kind, paths_mode):
     normalizer, execution = start(biblioteca)
     target = biblioteca / TARGETS[kind]
     real_write = writer._write
@@ -186,13 +170,13 @@ def _refuses(biblioteca, normalizer, execution, words):
     assert files(biblioteca) == before
 
 
-def test_resume_refuses_file_changed_after_interrupted_write(biblioteca, monkeypatch):
+def test_resume_refuses_file_changed_after_interrupted_write(biblioteca, monkeypatch, paths_mode):
     normalizer, execution = _crashed(biblioteca, monkeypatch, "written")
     (biblioteca / LRC).write_bytes(b"editado por otro programa\n")
     _refuses(biblioteca, normalizer, execution, "cambió fuera de la herramienta")
 
 
-def test_resume_refuses_missing_backup_copy(biblioteca, monkeypatch):
+def test_resume_refuses_missing_backup_copy(biblioteca, monkeypatch, paths_mode):
     normalizer, execution = _crashed(biblioteca, monkeypatch, "intent")
     intents, _done = execution.outcome()
     copy = next(event["copy"] for event in intents.values() if "copy" in event and LRC.split("/")[-1] in event["copy"])
@@ -200,13 +184,13 @@ def test_resume_refuses_missing_backup_copy(biblioteca, monkeypatch):
     _refuses(biblioteca, normalizer, execution, "falta la copia de respaldo")
 
 
-def test_resume_refuses_applied_file_changed_later(biblioteca, monkeypatch):
+def test_resume_refuses_applied_file_changed_later(biblioteca, monkeypatch, paths_mode):
     normalizer, execution = _crashed(biblioteca, monkeypatch, "start", TARGETS["mp3"])
     (biblioteca / LRC).write_bytes(b"otra cosa\n")  # ya estaba aplicado
     _refuses(biblioteca, normalizer, execution, "ya se había aplicado")
 
 
-def test_resume_refuses_completed_or_unfinished_plan(biblioteca, tmp_path):
+def test_resume_refuses_completed_or_unfinished_plan(biblioteca, tmp_path, paths_mode):
     normalizer, execution = start(biblioteca)
     runs.apply_run(execution, normalizer, biblioteca)
     _refuses(biblioteca, normalizer, runs.Run(execution.folder), "nada que reanudar")
@@ -221,7 +205,7 @@ def test_resume_refuses_completed_or_unfinished_plan(biblioteca, tmp_path):
 # Espacio libre
 # --------------------------------------------------------------------------
 
-def test_not_enough_space_before_applying(biblioteca, reference, original, monkeypatch):
+def test_not_enough_space_before_applying(biblioteca, reference, original, monkeypatch, paths_mode):
     usage = namedtuple("usage", "total used free")
     monkeypatch.setattr(runs.shutil, "disk_usage", lambda _path: usage(10**9, 10**9 - 1000, 1000))
     result = runner.invoke(app, ["normalize-lyrics", str(biblioteca), "--strip-headers", "--apply",
@@ -236,7 +220,7 @@ def test_not_enough_space_before_applying(biblioteca, reference, original, monke
     assert files(biblioteca) == reference
 
 
-def test_disk_full_mid_run_on_lyrics_file(biblioteca, reference, monkeypatch):
+def test_disk_full_mid_run_on_lyrics_file(biblioteca, reference, monkeypatch, paths_mode):
     normalizer, execution = start(biblioteca)
     calls = {"n": 0}
     real = runs.write_file_atomic
@@ -258,7 +242,7 @@ def test_disk_full_mid_run_on_lyrics_file(biblioteca, reference, monkeypatch):
     assert files(biblioteca) == reference
 
 
-def test_disk_full_mid_byte_write_restores_and_stops(biblioteca, reference, original, monkeypatch):
+def test_disk_full_mid_byte_write_restores_and_stops(biblioteca, reference, original, monkeypatch, paths_mode):
     normalizer, execution = start(biblioteca)
     target = biblioteca / TARGETS["flac"]
     real_write = writer._write
@@ -304,7 +288,8 @@ class Unplug:
 
     `on` elige qué escrituras cuentan para el momento de la desconexión:
     "library" (archivos de letra o audio), "backup" (copias en originales/),
-    "diary" (diario.jsonl) o "state" (estado.json).
+    "diary" (diario.jsonl), "state" (estado.json) o "delete" (borrados
+    dentro de la carpeta de respaldos, para clean-backups).
 
     `paths` reproduce cómo se comportan os.path.isdir/exists/isfile en cada
     sistema, para que la prueba dé lo mismo en Linux y en Windows:
@@ -328,7 +313,7 @@ class Unplug:
         real_stat = os.stat
         for module, name in [(builtins, "open"), (io, "open"), (os, "open"), (os, "stat"), (os, "lstat"),
                              (os, "scandir"), (os, "listdir"), (os, "replace"), (os, "rename"),
-                             (os, "unlink"), (os, "remove"), (os, "utime"), (os, "mkdir"),
+                             (os, "unlink"), (os, "remove"), (os, "rmdir"), (os, "utime"), (os, "mkdir"),
                              (shutil, "disk_usage")]:
             monkeypatch.setattr(module, name, self._wrap(getattr(module, name), name))
         statter = (lambda path: os.stat(path)) if paths == "posix" else real_stat
@@ -368,13 +353,18 @@ class Unplug:
                     raise self.error()
                 mode = args[1] if len(args) > 1 and isinstance(args[1], str) else kwargs.get("mode", "r")
                 writing = name in ("open",) and isinstance(mode, str) and any(c in mode for c in "wax+")
-                if writing and self._counts(paths[0]):
+                deleting = self.on == "delete" and name in ("unlink", "remove", "rmdir") \
+                    and self._in_backups(paths[0])
+                if (writing and self._counts(paths[0])) or deleting:
                     self.writes += 1
                     if self.writes >= self.after:
                         self.unplugged = True
                         raise self.error()
             return real(*args, **kwargs)
         return wrapper
+
+    def _in_backups(self, path) -> bool:
+        return os.path.normcase(os.path.abspath(os.fspath(path))).startswith(self.backups + os.sep)
 
     def _counts(self, path) -> bool:
         text = os.path.normcase(os.path.abspath(os.fspath(path)))
@@ -455,7 +445,7 @@ def test_drive_letter_disappears(biblioteca, reference, monkeypatch, paths):
 
 
 @pytest.mark.parametrize("code", sorted(runs.DEVICE_WINERRORS))
-def test_windows_device_errors_stop_the_run(biblioteca, reference, monkeypatch, code):
+def test_windows_device_errors_stop_the_run(biblioteca, reference, monkeypatch, code, paths_mode):
     assert runs.fatal_kind(win_error(code), biblioteca) == "device"
     normalizer, execution = start(biblioteca)
     calls = {"n": 0}
@@ -475,7 +465,7 @@ def test_windows_device_errors_stop_the_run(biblioteca, reference, monkeypatch, 
     assert files(biblioteca) == reference
 
 
-def test_access_denied_is_not_a_disconnection(biblioteca, monkeypatch):
+def test_access_denied_is_not_a_disconnection(biblioteca, monkeypatch, paths_mode):
     """WinError 5 (acceso denegado) es un fallo de ese archivo: la ejecución sigue."""
     (biblioteca / BACKUP_DIR_NAME).mkdir()  # como durante una ejecución
     assert runs.fatal_kind(win_error(5), biblioteca) is None
@@ -500,7 +490,7 @@ def test_access_denied_is_not_a_disconnection(biblioteca, monkeypatch):
     assert len(failed) == 1 and "WinError 5" in failed[0]["error"]
 
 
-def test_disconnection_while_planning(biblioteca, original, monkeypatch):
+def test_disconnection_while_planning(biblioteca, original, monkeypatch, paths_mode):
     real_iter = runs.iter_folders
 
     def iter_and_unplug(*args, **kwargs):
@@ -521,7 +511,7 @@ def test_disconnection_while_planning(biblioteca, original, monkeypatch):
 # Archivos modificados entre la planificación y la aplicación
 # --------------------------------------------------------------------------
 
-def test_files_modified_between_plan_and_apply(biblioteca, reference):
+def test_files_modified_between_plan_and_apply(biblioteca, reference, paths_mode):
     normalizer, execution = start(biblioteca)
     lrc = biblioteca / LRC
     lrc.write_bytes(lrc.read_bytes() + b"[00:20.00]Linea agregada por otro programa\n")
@@ -552,7 +542,7 @@ def _age(folder: Path, days: int) -> None:
     state_path.write_text(json.dumps(state), encoding="utf-8")
 
 
-def test_clean_backups_never_touches_incomplete_runs(biblioteca, monkeypatch):
+def test_clean_backups_never_touches_incomplete_runs(biblioteca, monkeypatch, paths_mode):
     normalizer, done_old = start(biblioteca)
     runs.apply_run(done_old, normalizer, biblioteca)
     backup.revert(done_old.folder)

@@ -593,9 +593,25 @@ def revert(
             console.print("Respaldo más reciente:")
             print_copyable(console, str(folder))
         results = backup.revert(folder, force=force, dry_run=dry_run)
+    except backup.RevertNoSpace as exc:
+        print_copyable(error_console, str(exc), "red")
+        raise typer.Exit(code=2)
+    except backup.RevertStopped as stop:
+        print_revert(stop.results, folder, console=console, dry_run=dry_run)
+        console.print()
+        print_copyable(console, f"SE DETUVO: {stop}", "bold red")
+        console.print("Lo restaurado hasta aquí está confirmado. Vuelve a ejecutar revert"
+                      + (" cuando la unidad esté conectada:" if stop.kind == "device" else
+                         " cuando haya espacio:" if stop.kind == "space" else ":"), markup=False)
+        print_copyable(console, f'choconostle revert "{folder}"')
+        raise typer.Exit(code=3)
     except (FileNotFoundError, ValueError, KeyError) as exc:
         print_copyable(error_console, f"No se puede revertir: {exc}", "red")
         raise typer.Exit(code=2)
+    except OSError as exc:
+        print_copyable(error_console, f"No se puede revertir: la biblioteca o el respaldo no están accesibles "
+                                      f"({exc}). Vuelve a ejecutar revert cuando la unidad esté conectada.", "red")
+        raise typer.Exit(code=3)
     print_revert(results, folder, console=console, dry_run=dry_run)
     if any(result.status in (backup.REVERT_CONFLICT, backup.REVERT_ERROR) for result in results):
         raise typer.Exit(code=1)
@@ -642,16 +658,31 @@ def clean_backups(
     _safe_streams()
     console = Console(highlight=False)
     path = path.expanduser()
-    remove, keep = runs.clean_backups(path, older_than, apply=apply)
+    stopped = None
+    try:
+        remove, keep = runs.clean_backups(path, older_than, apply=apply)
+    except runs.CleanStopped as stop:
+        remove, keep, stopped = stop.remove, stop.keep, stop
+    except OSError as exc:
+        print_copyable(console, f"No se pueden revisar los respaldos: la unidad no está accesible ({exc}). "
+                                f"Vuelve a ejecutar clean-backups cuando esté conectada.", "red")
+        raise typer.Exit(code=3)
     title = "BORRADOS" if apply else "SIMULACIÓN (no se borró nada)"
     console.print(f"[bold]clean-backups - {title}[/bold]")
     print_copyable(console, f"Respaldos de más de {older_than} días en {path / 'ChoconostleLRCTool_back'}")
     console.print()
     label = "Borrados" if apply else "Se borrarían"
-    console.print(f"{label} ({len(remove)}, {format_size(sum(i.size for i in remove))}):", markup=False)
-    for info in remove:
+    deleted = [info for info in remove if info.deleted] if apply else remove
+    console.print(f"{label} ({len(deleted)}, {format_size(sum(i.size for i in deleted))}):", markup=False)
+    for info in deleted:
         when = info.created.strftime("%Y-%m-%d %H:%M") if info.created else "?"
         console.print(Text(f"  {info.folder.name}  {when}  {format_size(info.size)}  ({info.state})"))
+    failed = [info for info in remove if apply and not info.deleted]
+    if failed:
+        console.print(f"No se pudieron borrar ({len(failed)}; se reintentará en la próxima ejecución):",
+                      markup=False)
+        for info in failed:
+            print_copyable(console, f"  {info.folder.name}: {info.error or 'no se llegó a intentar'}", "red")
     console.print(f"Se conservan ({len(keep)}):", markup=False)
     for info in keep:
         console.print(Text(f"  {info.folder.name}  {info.state}: {info.keep_reason}",
@@ -660,6 +691,15 @@ def clean_backups(
     if remove and not apply:
         console.print()
         console.print("Para borrarlos, repite el comando con --apply.", markup=False)
+    if stopped is not None:
+        console.print()
+        print_copyable(console, f"SE DETUVO: {stopped}", "bold red")
+        console.print("Vuelve a ejecutar cuando la unidad esté conectada; terminará los borrados a medias:",
+                      markup=False)
+        print_copyable(console, f'choconostle clean-backups "{path}" --older-than {older_than} --apply')
+        raise typer.Exit(code=3)
+    if failed:
+        raise typer.Exit(code=1)
 
 
 @app.command()

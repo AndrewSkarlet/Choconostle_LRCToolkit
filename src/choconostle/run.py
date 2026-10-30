@@ -34,8 +34,10 @@ Licencia: MIT
 from __future__ import annotations
 
 import errno
+import glob
 import json
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -228,7 +230,9 @@ class Run:
             name = now.strftime("%Y-%m-%d_%H-%M-%S")
             folder = base / name
             counter = 2
-            while folder.exists():
+            # Tampoco se reutiliza el nombre de una carpeta que se está borrando
+            # (clean-backups la renombra a <nombre>.borrando).
+            while folder.exists() or any(base.glob(glob.escape(folder.name) + DELETING_SUFFIX + "*")):
                 folder = base / f"{name}_{counter}"
                 counter += 1
             (folder / ORIGINALS_DIR).mkdir(parents=True)
@@ -1052,43 +1056,108 @@ def _resolve_intent(run: Run, root: Path, record: dict, intent: dict) -> tuple[s
 # Reversión
 # --------------------------------------------------------------------------
 
+def revert_space_needed(run: Run) -> int:
+    """
+    Espacio libre que necesita revert: el temporal más grande a la vez (un
+    .lrc entero, la pre-imagen de una región de etiquetas o un archivo de
+    audio si hay reescritura completa) más el margen.
+    """
+    intents, done = run.outcome()
+    largest = 0
+    for record in run.plan_records():
+        intent = intents.get(record["id"])
+        if record["status"] != "change" or intent is None:
+            continue
+        if record["type"] == "file":
+            largest = max(largest, record.get("original_size", 0))
+        elif intent.get("writer") == "mutagen-ogg" or intent.get("mode") == MODE_FULL:
+            largest = max(largest, record.get("size", 0))
+        else:
+            largest = max(largest, intent.get("new_len", 0))
+    return largest + SPACE_MARGIN
+
+
 def revert_run(folder: Path, force: bool = False, dry_run: bool = False) -> list:
-    """Deshace una ejecución (formato 3) a partir de su plan y su diario."""
+    """
+    Deshace una ejecución (formato 3) a partir de su plan y su diario.
+
+    Si la unidad se desconecta, se queda sin espacio o una restauración
+    falla, se detiene (RevertStopped) sin seguir con los demás archivos:
+    volver a ejecutar revert continúa donde quedó (lo ya restaurado cuenta
+    como "ya estaba como el original").
+    """
     from choconostle import backup
     run = Run(folder)
     root = run.library_root()
+    results: list = []
+
+    def stop(exc: BaseException, kind: str | None = None):
+        kind = kind or fatal_kind(exc, root) or "device"
+        reason = {"space": "sin espacio libre", "restore": "una restauración no se pudo completar"}.get(
+            kind, "la unidad dejó de responder (¿se desconectó la tarjeta SD?)")
+        try:
+            backup._write_revert_log(run.folder, root, results)
+        except OSError:
+            pass
+        raise backup.RevertStopped(results, kind, f"revert se detuvo: {reason} ({exc}).") from exc
+
+    try:
+        if not dry_run:
+            needed = revert_space_needed(run)
+            free = shutil.disk_usage(long_path(root)).free
+            if free < needed:
+                raise backup.RevertNoSpace(
+                    f"Espacio libre insuficiente para revertir: se necesitan {format_size(needed)} y hay "
+                    f"{format_size(free)}. No se modificó nada.")
+            recover(run.folder, root)
+        intents, done = run.outcome()
+        for record in run.plan_records():
+            if record["status"] != "change":
+                continue
+            new = _revert_record(run, root, record, intents, done, force, dry_run)
+            results += new
+            for result in new:
+                if result.status != backup.REVERT_ERROR or result.exc is None:
+                    continue
+                if result.message.startswith("ERROR GRAVE"):
+                    stop(result.exc, "restore")
+                if fatal_kind(result.exc, root):
+                    stop(result.exc)
+    except OSError as exc:
+        if fatal_kind(exc, root) or not reachable(root, backups=False):
+            stop(exc)
+        raise
     if not dry_run:
-        recover(run.folder, root)
-    intents, done = run.outcome()
-    results = []
-    for record in run.plan_records():
-        if record["status"] != "change":
-            continue
-        entry = record["id"]
-        intent = intents.get(entry)
-        result = done.get(entry)
-        applied = result is not None and result["status"] == APPLIED
-        if result is None and intent is not None:
-            state, _problem = _resolve_intent(run, root, record, intent) if not dry_run else (None, None)
-            applied = state == APPLIED
-            if applied:
-                result = dict(_applied_extra(root, record, intent), status=APPLIED)
-        items = _items(record)
-        if intent is None or not applied:
-            results += [backup.RevertResult(item, backup.REVERT_ALREADY, "No se había aplicado.") for item in items]
-            continue
-        if record["type"] == "file":
-            item = dict(items[0], original_copy=intent["copy"], original_sha256=record["original_sha"],
-                        new_sha256=record["new_sha"], original_mtime=record.get("original_mtime"))
-            results.append(backup._revert_file(item, run.folder, root, force, dry_run))
-            continue
-        edit = dict(intent, id=entry, path=record["path"], status=APPLIED)
-        if result and result.get("new_sha"):
-            edit["new_sha"] = result["new_sha"]
-        results += backup._revert_edit(edit, items, run.folder, root, dry_run)
-    if not dry_run:
-        backup._write_revert_log(run.folder, root, results)
+        try:
+            backup._write_revert_log(run.folder, root, results)
+        except OSError as exc:
+            stop(exc)
     return results
+
+
+def _revert_record(run: Run, root: Path, record: dict, intents: dict, done: dict, force: bool,
+                   dry_run: bool) -> list:
+    from choconostle import backup
+    entry = record["id"]
+    intent = intents.get(entry)
+    result = done.get(entry)
+    applied = result is not None and result["status"] == APPLIED
+    if result is None and intent is not None:
+        state, _problem = _resolve_intent(run, root, record, intent) if not dry_run else (None, None)
+        applied = state == APPLIED
+        if applied:
+            result = dict(_applied_extra(root, record, intent), status=APPLIED)
+    items = _items(record)
+    if intent is None or not applied:
+        return [backup.RevertResult(item, backup.REVERT_ALREADY, "No se había aplicado.") for item in items]
+    if record["type"] == "file":
+        item = dict(items[0], original_copy=intent["copy"], original_sha256=record["original_sha"],
+                    new_sha256=record["new_sha"], original_mtime=record.get("original_mtime"))
+        return [backup._revert_file(item, run.folder, root, force, dry_run)]
+    edit = dict(intent, id=entry, path=record["path"], status=APPLIED)
+    if result and result.get("new_sha"):
+        edit["new_sha"] = result["new_sha"]
+    return backup._revert_edit(edit, items, run.folder, root, dry_run)
 
 
 def _items(record: dict) -> list[dict]:
@@ -1134,6 +1203,9 @@ class BackupInfo:
     keep_reason: str | None = None
     """Motivo para no borrarlo nunca (incompleto, reanudable, escrituras pendientes)."""
     size: int = 0
+    error: str | None = None
+    """Error al borrarlo (p. ej. acceso denegado); se reintenta en la próxima ejecución."""
+    deleted: bool = False
 
 
 def list_backups(root: Path) -> list[BackupInfo]:
@@ -1144,7 +1216,10 @@ def list_backups(root: Path) -> list[BackupInfo]:
     for folder in sorted(base.iterdir()):
         if not folder.is_dir():
             continue
-        info = _backup_info(folder)
+        if _DELETING_RE.search(folder.name):
+            info = BackupInfo(folder, None, "borrado interrumpido", "borrado interrumpido: se terminará de borrar")
+        else:
+            info = _backup_info(folder)
         info.size = sum(p.stat().st_size for p in folder.rglob("*") if p.is_file())
         found.append(info)
     return found
@@ -1194,16 +1269,62 @@ def _parse_date(value: str | None) -> datetime | None:
         return None
 
 
+DELETING_SUFFIX = ".borrando"
+_DELETING_RE = re.compile(r"\.borrando(-\d+)?$")
+
+
+class CleanStopped(Exception):
+    """clean-backups se detuvo (unidad desconectada); volver a ejecutarlo termina el trabajo."""
+
+    def __init__(self, remove: list, keep: list, kind: str, message: str):
+        self.remove = remove
+        self.keep = keep
+        self.kind = kind
+        super().__init__(message)
+
+
+def _delete_backup(info: BackupInfo) -> None:
+    """
+    Borra una carpeta de respaldo de forma reanudable: primero se renombra
+    a <nombre>.borrando (una carpeta a medias nunca parece un respaldo
+    válido) y luego se borra archivo por archivo, con rutas completas
+    (igual en Windows, Linux y Android).
+    """
+    folder = info.folder
+    if not _DELETING_RE.search(folder.name):
+        target = folder.with_name(folder.name + DELETING_SUFFIX)
+        counter = 2
+        while os.path.lexists(long_path(target)):  # otro borrado a medias con el mismo nombre
+            target = folder.with_name(f"{folder.name}{DELETING_SUFFIX}-{counter}")
+            counter += 1
+        os.rename(long_path(folder), long_path(target))
+        info.folder = folder = target
+
+    def fail(error: OSError):
+        raise error
+    for dirpath, _dirnames, filenames in os.walk(long_path(folder), topdown=False, onerror=fail):
+        for name in filenames:
+            os.unlink(os.path.join(dirpath, name))
+        os.rmdir(dirpath)
+
+
 def clean_backups(root: Path, older_than_days: int, apply: bool = False,
                   now: datetime | None = None) -> tuple[list[BackupInfo], list[BackupInfo]]:
     """
     (a borrar, a conservar). Solo borra con apply=True y nunca una
-    ejecución incompleta, reanudable o con escrituras pendientes.
+    ejecución incompleta, reanudable o con escrituras pendientes. Los
+    borrados interrumpidos (<nombre>.borrando) se terminan siempre.
+
+    Un error en una carpeta (p. ej. acceso denegado) se anota en
+    `info.error` y se sigue con las demás; si la unidad se desconecta o deja
+    de responder, se lanza CleanStopped.
     """
     now = now or datetime.now()
     remove, keep = [], []
     for info in list_backups(root):
-        if info.keep_reason:
+        if info.kind == "borrado interrumpido":
+            remove.append(info)
+        elif info.keep_reason:
             keep.append(info)
         elif info.created is None:
             info.keep_reason = "fecha desconocida"
@@ -1215,6 +1336,16 @@ def clean_backups(root: Path, older_than_days: int, apply: bool = False,
             keep.append(info)
     if apply:
         for info in remove:
-            shutil.rmtree(info.folder)
+            try:
+                _delete_backup(info)
+            except OSError as exc:
+                kind = fatal_kind(exc, root)
+                if kind:
+                    info.error = str(exc)
+                    raise CleanStopped(remove, keep, kind,
+                                       f"clean-backups se detuvo: la unidad dejó de responder ({exc}).") from exc
+                info.error = str(exc)
+                continue
+            info.deleted = True
     return remove, keep
 

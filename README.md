@@ -297,6 +297,9 @@ Cada entrada pasa por estos pasos, y una interrupción en cualquiera de ellos se
 - Funciona también con ejecuciones interrumpidas: solo deshace lo que llegó a aplicarse.
 - `--dry-run` muestra qué restauraría sin cambiar nada.
 - Revertir dos veces no hace nada la segunda vez.
+- Antes de empezar se comprueba el espacio libre (el temporal más grande más un margen).
+- Si la unidad se desconecta o se queda sin espacio, `revert` se detiene (código 3) y muestra el comando para repetirlo; al repetirlo continúa donde quedó.
+- Un acceso denegado o una copia de respaldo que falta solo afectan a ese archivo (código 1).
 - Los respaldos de versiones anteriores (manifiesto versión 1 y 2) se siguen pudiendo revertir.
 - `choconostle revert <biblioteca> --latest` usa el respaldo más reciente. También acepta la carpeta `ChoconostleLRCTool_back`. Sin `--latest`, lista los últimos respaldos para elegir.
 - Si la carpeta no es un respaldo, el mensaje indica qué archivo se buscaba (`estado.json`, o `manifiesto.json` en versiones anteriores) y recuerda comprobar que la ruta esté completa y en una sola línea.
@@ -307,7 +310,14 @@ Las rutas y comandos que hay que copiar («Para deshacer», «Para continuar», 
 
 ### Limpieza de respaldos
 
-`choconostle clean-backups RUTA --older-than DÍAS` lista los respaldos con al menos esos días de antigüedad. Solo los borra con `--apply`. **Nunca borra** un respaldo:
+`choconostle clean-backups RUTA --older-than DÍAS` lista los respaldos con al menos esos días de antigüedad. Solo los borra con `--apply`.
+
+El borrado es reanudable:
+- Cada carpeta se renombra primero a `<nombre>.borrando` y se borra archivo por archivo.
+- Si la unidad se desconecta, se detiene (código 3) y la siguiente ejecución termina los borrados a medias.
+- Si una carpeta no se puede borrar (p. ej. acceso denegado), se sigue con las demás (código 1).
+
+**Nunca borra** un respaldo:
 - incompleto o reanudable (aplicando, interrumpido, o planificado sin aplicar);
 - con escrituras interrumpidas sin resolver;
 - con entradas sin confirmar en el diario;
@@ -413,6 +423,8 @@ Las pruebas de FLAC, MP3, WAV y APE generan los archivos en Python puro. Las de 
 `tests/conftest.py` genera una vez por sesión la biblioteca de casos de `tools/generar_casos.py` (ver `tools/CASOS.md`) en una carpeta temporal; `test_casos_generados.py`, `test_rawtags.py` y `test_run.py` trabajan sobre copias. También necesitan `ffmpeg`.
 
 `tools/medir_verificacion.py` crea una biblioteca sintética grande (Linux, ffmpeg) y mide el costo de `--verify full` frente a `--verify quick`.
+
+`tests/COBERTURA.md` resume qué prueba cubre cada situación de riesgo (corte en cada paso del diario, desconexión EIO/WinError 1167/3/5, falta de espacio ENOSPC/WinError 112, archivos modificados, `--resume` con respaldos incompletos o ajenos) para `normalize-lyrics`, `convert-lyrics`, `revert` y `clean-backups`. Todas se ejecutan en dos modos («posix» y «windows») que reproducen cómo se comporta `os.path` en cada sistema.
 
 ## Licencia
 

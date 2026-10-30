@@ -5,6 +5,28 @@
 ### Pendiente
 - Etapa 6: medir memoria y tiempo con bibliotecas sintéticas de tamaño creciente. Sigue creciendo con la biblioteca la tabla de resultados por entrada que se arma al reanudar, revertir y mostrar el reporte (un diccionario de identificadores).
 
+### Etapa 5: pruebas de robustez
+
+#### Agregado
+- `tests/COBERTURA.md`: tabla de qué prueba cubre cada situación de riesgo para `normalize-lyrics`, `convert-lyrics`, `revert` y `clean-backups`.
+- `tests/test_robustez.py`: lo que faltaba de la tabla, todo en los modos «posix» y «windows»:
+  - `convert-lyrics`: corte en cada paso del diario y a mitad de escritura, WinError 3 y 5, espacio antes y a mitad, archivos modificados, `--resume` con respaldo incompleto o ajeno;
+  - `revert`: interrupción, desconexión (EIO, 1167, 3), acceso denegado, espacio (antes, ENOSPC, WinError 112), conflictos, respaldo incompleto;
+  - `clean-backups`: desconexión, acceso denegado e interrupción;
+  - WinError 112 a mitad de ejecución en los dos comandos.
+- Fixture `paths_mode`: las pruebas de la etapa ③ que se ejecutaban en un solo modo ahora se ejecutan en los dos.
+
+#### Corregido
+- `revert` ante una desconexión o falta de espacio: antes marcaba cada archivo como error y seguía con todos los demás. Ahora:
+  - comprueba el espacio antes de empezar (código 2);
+  - se detiene en el primer error fatal (código 3) con el comando para repetirlo, que continúa donde quedó.
+- `clean-backups`: el borrado ya no usa `shutil.rmtree`, que se comporta distinto en Linux y Windows y no capturaba errores. Ahora:
+  - es reanudable (`<nombre>.borrando`);
+  - se detiene ante una desconexión (código 3);
+  - sigue con las demás carpetas ante un acceso denegado (código 1).
+
+- Nombres de respaldo: una ejecución creada en el mismo segundo que un borrado interrumpido reutilizaba el nombre liberado, y luego su borrado chocaba con el `.borrando` anterior. Ahora no se reutiliza ese nombre y el borrado usa `.borrando-2`, `-3`… Lo detectó una prueba que fallaba de forma intermitente; ahora tiene una prueba determinista.
+
 ### Etapa 4: convert-lyrics
 
 #### Agregado
