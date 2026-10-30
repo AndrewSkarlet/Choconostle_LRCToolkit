@@ -42,6 +42,7 @@ import shutil
 import stat
 import tempfile
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -158,6 +159,49 @@ def iter_jsonl(path: Path):
                 yield json.loads(line)
             except json.JSONDecodeError:
                 continue
+
+
+def _jsonl_offsets(path: Path):
+    """(posición, evento) de cada línea completa, con las mismas reglas que iter_jsonl."""
+    if not path.exists():
+        return
+    with open(long_path(path), "rb") as handle:
+        offset = 0
+        for line in handle:
+            start, offset = offset, offset + len(line)
+            if not line.endswith(b"\n"):
+                return
+            try:
+                yield start, json.loads(line.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+
+
+class DiaryEvents(Mapping):
+    """Eventos del diario por id, leídos del disco al pedirlos (solo se guardan las posiciones)."""
+
+    def __init__(self, path: Path, offsets: dict[int, int]):
+        self._path = path
+        self._offsets = offsets
+
+    def __getitem__(self, entry: int) -> dict:
+        offset = self._offsets[entry]
+        with open(long_path(self._path), "rb") as handle:
+            handle.seek(offset)
+            return json.loads(handle.readline().decode("utf-8"))
+
+    def __iter__(self):
+        return iter(self._offsets)
+
+    def __len__(self) -> int:
+        return len(self._offsets)
+
+    def values(self):
+        """Todos los eventos en una sola lectura del diario."""
+        wanted = {offset for offset in self._offsets.values()}
+        for offset, event in _jsonl_offsets(self._path):
+            if offset in wanted:
+                yield event
 
 
 def _safe_name(name: str, limit: int = 80) -> str:
@@ -298,15 +342,22 @@ class Run:
     def events(self):
         yield from iter_jsonl(self.folder / DIARY_NAME)
 
-    def outcome(self) -> tuple[dict, dict]:
-        """({id: evento intent}, {id: evento done}) (el último de cada uno)."""
+    def outcome(self) -> tuple[DiaryEvents, DiaryEvents]:
+        """
+        ({id: evento intent}, {id: evento done}) (el último de cada uno).
+
+        En memoria solo quedan las posiciones de cada evento en el diario;
+        el evento se lee del disco cuando se pide (etapa ⑥: con miles de
+        entradas, los eventos enteros ocupaban unos 2 KB por entrada).
+        """
+        path = self.folder / DIARY_NAME
         intents, done = {}, {}
-        for event in self.events():
-            if event["event"] == "intent":
-                intents[event["id"]] = event
-            elif event["event"] == "done":
-                done[event["id"]] = event
-        return intents, done
+        for offset, event in _jsonl_offsets(path):
+            if event.get("event") == "intent":
+                intents[event["id"]] = offset
+            elif event.get("event") == "done":
+                done[event["id"]] = offset
+        return DiaryEvents(path, intents), DiaryEvents(path, done)
 
     def log(self, lines: list[str]) -> None:
         with open(long_path(self.folder / LOG_NAME), "a", encoding="utf-8") as handle:
@@ -1077,6 +1128,9 @@ def revert_space_needed(run: Run) -> int:
     return largest + SPACE_MARGIN
 
 
+REVERT_ITEM_KEYS = ("id", "kind", "path", "label")
+
+
 def revert_run(folder: Path, force: bool = False, dry_run: bool = False) -> list:
     """
     Deshace una ejecución (formato 3) a partir de su plan y su diario.
@@ -1115,6 +1169,10 @@ def revert_run(folder: Path, force: bool = False, dry_run: bool = False) -> list
             if record["status"] != "change":
                 continue
             new = _revert_record(run, root, record, intents, done, force, dry_run)
+            for result in new:
+                # Solo lo que usan el registro y la consola: la letra original
+                # ocupaba en memoria hasta terminar (etapa ⑥).
+                result.item = {key: result.item[key] for key in REVERT_ITEM_KEYS if key in result.item}
             results += new
             for result in new:
                 if result.status != backup.REVERT_ERROR or result.exc is None:

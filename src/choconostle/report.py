@@ -591,8 +591,12 @@ def print_run_report(
                   f"{plural(totals['embedded_changed'], 'incrustada')}) en "
                   f"{plural(totals['songs_changed'], 'canción', 'canciones')}")
     if applied and summary is not None:
-        applied_count = sum(1 for event in done.values() if event["status"] == "applied")
-        failed_count = sum(1 for event in done.values() if event["status"] != "applied")
+        applied_count = failed_count = 0
+        for event in done.values():
+            if event["status"] == "applied":
+                applied_count += 1
+            else:
+                failed_count += 1
         table.add_row("Aplicadas (archivos)", str(applied_count))
         if failed_count:
             table.add_row("Con error (archivos)", f"[red]{failed_count}[/red]")

@@ -3,7 +3,25 @@
 ## Sin publicar - Fase 2.1
 
 ### Pendiente
-- Etapa 6: medir memoria y tiempo con bibliotecas sintéticas de tamaño creciente. Sigue creciendo con la biblioteca la tabla de resultados por entrada que se arma al reanudar, revertir y mostrar el reporte (un diccionario de identificadores).
+- Etapa 7: documentación final y PR.
+
+### Etapa 6: memoria y tiempo
+
+#### Agregado
+- `tools/medir_rendimiento.py`:
+  - mide el pico de memoria, el tiempo, los recuentos y el tamaño del respaldo de cada comando con bibliotecas de tamaño creciente, hechas con `tools/generar_casos.py`;
+  - `--destino` elige dónde crear las carpetas de medición;
+  - `--ruta-real` mide sobre una copia limitada de una carpeta real sin modificar el original.
+- `docs/RENDIMIENTO.md`: resultados antes y después con 230, 2 300, 6 900 y 13 800 archivos.
+- `tests/test_memoria.py`: regresión de memoria con `tracemalloc` (×1 frente a ×20).
+
+#### Corregido
+- Los eventos del diario se cargaban enteros en memoria (unos 2 KB por entrada) en `revert`, `--resume`, el reporte de `--apply` y `clean-backups`. Ahora se guarda solo su posición en `diario.jsonl` y se leen al pedirlos (unos 185 B por entrada).
+- Los resultados de `revert` guardaban la letra original hasta terminar. Ahora solo guardan id, tipo, ruta y etiqueta.
+- Con 13 800 archivos, el pico de `revert` baja de 81,5 MB a 70,1 MB. El crecimiento baja de 1 284 a 420 bytes por archivo.
+
+#### Limitaciones medidas
+- `revert` sigue creciendo unos 420 bytes por archivo y `scan` unos 1,3 KB por archivo. `scan` queda fuera de las correcciones de esta fase.
 
 ### Etapa 5: pruebas de robustez
 

@@ -4,7 +4,7 @@ Este documento sirve para que una sesión nueva continúe la Fase 2.1 sin ayuda 
 
 - **Rama:** `claude/adoring-cerf-o8xdvp`, creada desde `master` después de fusionar el PR #2. Todo se sube a esta rama.
 - **PR:** todavía no existe. Se abre en la etapa ⑦ como PR independiente, **sin fusionarlo**.
-- **Estado:** etapas ① a ⑤ aprobadas por el usuario. La siguiente es la ⑥, que **no se ha empezado**.
+- **Estado:** etapas ① a ⑤ aprobadas por el usuario. La ⑥ está hecha y **pendiente de aprobación**. No empezar la ⑦ sin aprobación.
 
 ## 1. Estado de las etapas
 
@@ -15,7 +15,7 @@ Este documento sirve para que una sesión nueva continúe la Fase 2.1 sin ayuda 
 | ③ | Ejecución en dos pasadas con plan en disco, `--resume`, comprobación de espacio, desconexión de la SD, rutas largas de Windows, `clean-backups`, `--verify auto` y resumen de `--apply` con más de 50 entradas. | Aprobada | `201da60`, `1940930`, `829dece`, `adced00` |
 | ④ | Comando `convert-lyrics` (`--to`, `--eol`, `--source-encoding`, `--prefer-encoding`, `--replace-char`, `--id3-encoding`, `--on-unencodable`), aviso para UTF-16/UTF-32 y decisiones documentadas. | Aprobada | `7b5415f`, `e4f33a5` |
 | ⑤ | Pruebas de robustez en los modos `posix` y `windows`. Correcciones de `revert` y `clean-backups`, y de la colisión de nombres `.borrando`. | Aprobada | `1c40a32` |
-| ⑥ | Medición de memoria y tiempo. | **Pendiente** | — |
+| ⑥ | Medición de memoria y tiempo (`tools/medir_rendimiento.py`, `docs/RENDIMIENTO.md`, `tests/test_memoria.py`). Eventos del diario leídos del disco y resultados de `revert` reducidos. | Hecha, pendiente de aprobación | commit «Fase 2.1, etapa 6» (ver `git log`) |
 | ⑦ | Documentación final y PR sin fusionar. | **Pendiente** | — |
 
 Al aprobar la ⑤, la suite tenía 453 pruebas: pasaba 3 de 3 veces en Linux y 453 de 453 en Windows. La prueba manual de `clean-backups` en Windows sigue pendiente (ver la sección 3).
@@ -99,23 +99,16 @@ Equipo del usuario: Windows, Python 3.15.1 y charset-normalizer 3.5.2 (rueda com
 
 ## 4. Pendientes
 
-### Etapa ⑥: medición de memoria y tiempo
-Requisitos del usuario (sección 7 de la especificación):
-- La biblioteca real tiene 234 GB en una SD externa y el equipo tiene 16 GB de RAM.
-- Generar bibliotecas sintéticas de tamaño creciente, con miles de archivos y distintos tamaños de letras y etiquetas.
-- Medir:
-  - el pico de memoria;
-  - el tiempo total y por archivo;
-  - los archivos escaneados, planificados, modificados y omitidos;
-  - el crecimiento de la memoria con el número de archivos.
-- No declarar que el consumo es constante sin resultados que lo demuestren.
-- Identificar las estructuras que acumulan datos en memoria y corregir los cuellos de botella.
-- Las mediciones se hacen en carpetas temporales generadas. **Nunca** sobre la biblioteca real.
-- Si `tools/generar_casos.py` no sirve para generar miles de archivos, **hay que preguntar al usuario** antes de crear otra herramienta. Lo mismo vale para cualquier otro archivo que falte en el repositorio.
-
-Cuello de botella ya conocido: la tabla de resultados por entrada (un diccionario de identificadores) que se arma al reanudar, al revertir y al mostrar el reporte sigue creciendo con la biblioteca. Está anotado en la sección «Pendiente» del CHANGELOG.
-
-El escaneo (`scanner.iter_folders`) y la planificación (`plan.jsonl` en disco) ya son incrementales, pero no se han medido.
+### Etapa ⑥: hecha, pendiente de aprobación
+- Los resultados están en `docs/RENDIMIENTO.md`.
+- El usuario aprobó una versión reducida:
+  - N = 1, 10, 30 y 60 (hasta 13 800 archivos; su biblioteca tiene unos 7 000 archivos de audio);
+  - solo dos variantes (letra de 100 KB y portada de 5 MB);
+  - cada medición una sola vez;
+  - `scan` solo se mide, no se corrige;
+  - `--destino` y `--ruta-real` (sobre una copia limitada; nunca se toca el original).
+- Queda medido y sin corregir: `revert` crece unos 420 bytes por archivo y `scan` unos 1,3 KB por archivo.
+- Las mediciones se hicieron en Linux, en disco local. No se han medido en Windows ni en una SD.
 
 ### Etapa ⑦: documentación final y PR
 - Repasar `README.md` y `CHANGELOG.md`: comandos, valores por defecto, limitaciones, incompatibilidades con la v0.2.0 y los resultados de la ⑥.

@@ -268,6 +268,13 @@ La segunda lectura de `full` sale de la caché del sistema, no del disco. Por es
 
 **Rutas largas en Windows.** Las rutas de 240 caracteres o más reciben el prefijo `\\?\` (o `\\?\UNC\` en red), así funcionan aunque Windows no tenga activado `LongPathsEnabled`. Otros programas (y algunas versiones de mutagen) pueden seguir limitados a 260 caracteres.
 
+**Memoria y tiempo.** Medido con hasta 13 800 archivos (`docs/RENDIMIENTO.md`):
+- `normalize-lyrics` y `convert-lyrics` usan prácticamente la misma memoria con 230 que con 13 800 archivos: unos 57 MB con `--diff` y 67 MB con `--apply`, incluido el intérprete. Crecen menos de 60 bytes por archivo.
+- `revert` crece unos 420 bytes por archivo y `scan` unos 1,3 KB por archivo.
+- El tiempo es lineal: unos 2 ms por archivo con `--apply` en disco local.
+
+`tools/medir_rendimiento.py` repite la medición en otra carpeta, por ejemplo en la SD. Con `--ruta-real` mide sobre una copia de tu biblioteca, sin modificar el original.
+
 ### Respaldo y reversión
 
 Antes de modificar nada, `--apply` crea:
@@ -421,6 +428,8 @@ pytest
 Las pruebas de FLAC, MP3, WAV y APE generan los archivos en Python puro. Las de M4A, Opus, Ogg, WavPack, AIFF, Matroska y Dolby usan `ffmpeg` y se omiten si no está instalado.
 
 `tests/conftest.py` genera una vez por sesión la biblioteca de casos de `tools/generar_casos.py` (ver `tools/CASOS.md`) en una carpeta temporal; `test_casos_generados.py`, `test_rawtags.py` y `test_run.py` trabajan sobre copias. También necesitan `ffmpeg`.
+
+`tests/test_memoria.py` comprueba que el pico de memoria de un ciclo completo (planificar, aplicar, reporte, revertir) no crece con el número de archivos. `tools/medir_rendimiento.py` mide memoria y tiempo con bibliotecas de tamaño creciente (ver `docs/RENDIMIENTO.md`).
 
 `tools/medir_verificacion.py` crea una biblioteca sintética grande (Linux, ffmpeg) y mide el costo de `--verify full` frente a `--verify quick`.
 
