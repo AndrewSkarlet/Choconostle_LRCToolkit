@@ -3,7 +3,13 @@
 ## Sin publicar - Fase 2.1
 
 ### Pendiente
-- Etapa 7: documentación final y PR.
+- Número de versión: se propone 0.3.0 por las incompatibilidades con la v0.2.0. No se cambia sin aprobación.
+- `tests/test_memoria.py` tarda entre 45 y 57 s en Windows, más de los 30 s previstos: reducirlo.
+- Verificación en Windows de la suite completa y del ciclo con FLAC reales sobre el commit de la etapa 6.
+- No probado: desconexión real de una SD, Termux/Android, el editor ID3 con MP3 reales con cabeceras, y las mediciones de rendimiento en Windows y en una SD.
+
+### Etapa 7: documentación y PR
+- `.gitignore` excluye `ChoconostleLRCTool_back/` y las bibliotecas de prueba generadas.
 
 ### Etapa 6: memoria y tiempo
 

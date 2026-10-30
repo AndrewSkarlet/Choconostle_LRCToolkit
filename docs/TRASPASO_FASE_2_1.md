@@ -3,8 +3,8 @@
 Este documento sirve para que una sesión nueva continúe la Fase 2.1 sin ayuda del usuario. Léelo entero antes de tocar código y responde siempre en español.
 
 - **Rama:** `claude/adoring-cerf-o8xdvp`, creada desde `master` después de fusionar el PR #2. Todo se sube a esta rama.
-- **PR:** todavía no existe. Se abre en la etapa ⑦ como PR independiente, **sin fusionarlo**.
-- **Estado:** etapas ① a ⑤ aprobadas por el usuario. La ⑥ está hecha y **pendiente de aprobación**. No empezar la ⑦ sin aprobación.
+- **PR:** abierto en la etapa ⑦ desde esta rama contra `master`, **sin fusionar**. No fusionarlo nunca de forma automática.
+- **Estado:** etapas ① a ⑥ aprobadas por el usuario. La ⑦ (documentación y PR) está hecha y pendiente de revisión. Quedan pendientes las verificaciones del usuario y la versión (sección 4).
 
 ## 1. Estado de las etapas
 
@@ -15,10 +15,10 @@ Este documento sirve para que una sesión nueva continúe la Fase 2.1 sin ayuda 
 | ③ | Ejecución en dos pasadas con plan en disco, `--resume`, comprobación de espacio, desconexión de la SD, rutas largas de Windows, `clean-backups`, `--verify auto` y resumen de `--apply` con más de 50 entradas. | Aprobada | `201da60`, `1940930`, `829dece`, `adced00` |
 | ④ | Comando `convert-lyrics` (`--to`, `--eol`, `--source-encoding`, `--prefer-encoding`, `--replace-char`, `--id3-encoding`, `--on-unencodable`), aviso para UTF-16/UTF-32 y decisiones documentadas. | Aprobada | `7b5415f`, `e4f33a5` |
 | ⑤ | Pruebas de robustez en los modos `posix` y `windows`. Correcciones de `revert` y `clean-backups`, y de la colisión de nombres `.borrando`. | Aprobada | `1c40a32` |
-| ⑥ | Medición de memoria y tiempo (`tools/medir_rendimiento.py`, `docs/RENDIMIENTO.md`, `tests/test_memoria.py`). Eventos del diario leídos del disco y resultados de `revert` reducidos. | Hecha, pendiente de aprobación | commit «Fase 2.1, etapa 6» (ver `git log`) |
-| ⑦ | Documentación final y PR sin fusionar. | **Pendiente** | — |
+| ⑥ | Medición de memoria y tiempo (`tools/medir_rendimiento.py`, `docs/RENDIMIENTO.md`, `tests/test_memoria.py`). Eventos del diario leídos del disco y resultados de `revert` reducidos. | Aprobada | `2793277` |
+| ⑦ | Documentación final, `.gitignore` y PR sin fusionar. | Hecha, pendiente de revisión | commit «Fase 2.1, etapa 7» (ver `git log`) |
 
-Al aprobar la ⑤, la suite tenía 453 pruebas: pasaba 3 de 3 veces en Linux y 453 de 453 en Windows. La prueba manual de `clean-backups` en Windows sigue pendiente (ver la sección 3).
+Al aprobar la ⑤, la suite tenía 453 pruebas: pasaba 3 de 3 veces en Linux y 453 de 453 en Windows. Con la ⑥ son 454 (454 de 454 en Linux; en Windows, pendiente de confirmar sobre `2793277`). Ver la sección 3.
 
 Los detalles de cada etapa están en `CHANGELOG.md`, que incluye la lista de incompatibilidades con la v0.2.0, y en `README.md`.
 
@@ -95,24 +95,21 @@ Equipo del usuario: Windows, Python 3.15.1 y charset-normalizer 3.5.2 (rueda com
 | Etapa ④ | Bien | Sin hallazgos nuevos. |
 | Etapa ⑤ (`1c40a32`) | 453 de 453 (38 minutos, en los modos `posix` y `windows`) | Sin hallazgos nuevos. |
 
-**Pendiente del usuario:** la prueba manual de `clean-backups` en Windows sobre una carpeta de prueba (por ejemplo con `--older-than 0`) todavía no se ha hecho. No hay que citarla como verificada hasta que el usuario la confirme.
+| Etapa ⑥ (`2793277`) | `tests/test_memoria.py`: 3 de 3 (entre 45 y 57 s cada vez, más de los 30 s previstos; mejora pendiente) | Prueba manual de `clean-backups` sobre una carpeta de prueba: borró los respaldos sin problemas. |
+
+**Pendiente del usuario sobre `2793277`:** la suite completa y el ciclo con FLAC reales. No citarlos como verificados hasta que el usuario los confirme.
+
+**No probado:** la desconexión real de una SD (solo está simulada con `Unplug`), Termux/Android (solo se simula charset-normalizer en Python puro, en Linux), el editor ID3 con MP3 reales con cabeceras (solo MP3 generados), y las mediciones de rendimiento en Windows y en una SD (solo hay Linux en disco local).
 
 ## 4. Pendientes
 
-### Etapa ⑥: hecha, pendiente de aprobación
-- Los resultados están en `docs/RENDIMIENTO.md`.
-- El usuario aprobó una versión reducida:
-  - N = 1, 10, 30 y 60 (hasta 13 800 archivos; su biblioteca tiene unos 7 000 archivos de audio);
-  - solo dos variantes (letra de 100 KB y portada de 5 MB);
-  - cada medición una sola vez;
-  - `scan` solo se mide, no se corrige;
-  - `--destino` y `--ruta-real` (sobre una copia limitada; nunca se toca el original).
-- Queda medido y sin corregir: `revert` crece unos 420 bytes por archivo y `scan` unos 1,3 KB por archivo.
-- Las mediciones se hicieron en Linux, en disco local. No se han medido en Windows ni en una SD.
+### Etapa ⑥: aprobada
+- Los resultados están en `docs/RENDIMIENTO.md`. Queda medido y sin corregir: `revert` crece unos 420 bytes por archivo y `scan` unos 1,3 KB por archivo.
+- Mejora pendiente: `tests/test_memoria.py` tarda entre 45 y 57 s en Windows; el usuario pidió unos 30 s.
 
-### Etapa ⑦: documentación final y PR
-- Repasar `README.md` y `CHANGELOG.md`: comandos, valores por defecto, limitaciones, incompatibilidades con la v0.2.0 y los resultados de la ⑥.
-- Abrir un PR independiente desde `claude/adoring-cerf-o8xdvp` hacia `master`, **sin fusionarlo**. Antes, buscar una plantilla de PR en el repositorio.
+### Etapa ⑦: hecha, pendiente de revisión
+- PR abierto contra `master`, sin fusionar. La descripción del PR tiene el resumen por etapa, las incompatibilidades con la v0.2.0 y la tabla «verificado / simulado / no probado».
+- **Versión:** se propone 0.3.0 (sube la menor por las incompatibilidades). `pyproject.toml` y `config.py` siguen en 0.2.0 hasta que el usuario lo apruebe.
 
 ### Ideas anotadas (sin implementar)
 - Detectar letras que en realidad son publicidad o créditos de la web de origen, por ejemplo una URL que se repite en muchos archivos. Es solo una idea sin implementar y no forma parte de ninguna etapa.

@@ -429,7 +429,7 @@ Las pruebas de FLAC, MP3, WAV y APE generan los archivos en Python puro. Las de 
 
 `tests/conftest.py` genera una vez por sesión la biblioteca de casos de `tools/generar_casos.py` (ver `tools/CASOS.md`) en una carpeta temporal; `test_casos_generados.py`, `test_rawtags.py` y `test_run.py` trabajan sobre copias. También necesitan `ffmpeg`.
 
-`tests/test_memoria.py` comprueba que el pico de memoria de un ciclo completo (planificar, aplicar, reporte, revertir) no crece con el número de archivos. `tools/medir_rendimiento.py` mide memoria y tiempo con bibliotecas de tamaño creciente (ver `docs/RENDIMIENTO.md`).
+`tests/test_memoria.py` comprueba que el pico de memoria de un ciclo completo (planificar, aplicar, reporte, revertir) no crece con el número de archivos. Tarda unos 11 s en Linux y entre 45 y 57 s en Windows. `tools/medir_rendimiento.py` mide memoria y tiempo con bibliotecas de tamaño creciente (ver `docs/RENDIMIENTO.md`).
 
 `tools/medir_verificacion.py` crea una biblioteca sintética grande (Linux, ffmpeg) y mide el costo de `--verify full` frente a `--verify quick`.
 
