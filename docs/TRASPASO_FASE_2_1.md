@@ -18,7 +18,7 @@ Este documento sirve para que una sesión nueva continúe la Fase 2.1 sin ayuda 
 | ⑥ | Medición de memoria y tiempo. | **Pendiente** | — |
 | ⑦ | Documentación final y PR sin fusionar. | **Pendiente** | — |
 
-Al aprobar la ⑤, la suite tenía 453 pruebas y pasaba 3 de 3 veces en Linux.
+Al aprobar la ⑤, la suite tenía 453 pruebas: pasaba 3 de 3 veces en Linux y 453 de 453 en Windows. La prueba manual de `clean-backups` en Windows sigue pendiente (ver la sección 3).
 
 Los detalles de cada etapa están en `CHANGELOG.md`, que incluye la lista de incompatibilidades con la v0.2.0, y en `README.md`.
 
@@ -93,9 +93,9 @@ Equipo del usuario: Windows, Python 3.15.1 y charset-normalizer 3.5.2 (rueda com
 | Etapa ③ (`1940930`) | 237 de 240 | Dos causas de fallo. Primera: en Windows, `os.path.isdir` y `os.path.exists` son funciones en C (`nt._path_isdir`) que **no pasan por `os.stat`**, así que la desconexión simulada no se veía. Segunda: escribir el diario o el respaldo podía dejar escapar el `OSError`. **Solución:** `run.reachable()` usa `os.stat`; `_diary()` protege la escritura; las pruebas se ejecutan en los modos `posix` y `windows` (fixture `paths_mode` y parámetro `paths` de `Unplug`). |
 | Etapa ③ (`829dece`) | 274 de 274 | Ciclo con 67 FLAC reales (apply, verificación de audio y etiquetas, `revert --latest`): **comparación byte a byte con 0 diferencias**. Rutas largas de 580 caracteres y `revert` idempotente correctos. |
 | Etapa ④ | Bien | Sin hallazgos nuevos. |
-| Etapa ⑤ (`1c40a32`) | Ver la nota | `clean-backups --older-than 0` sobre una carpeta de prueba. |
+| Etapa ⑤ (`1c40a32`) | 453 de 453 (38 minutos, en los modos `posix` y `windows`) | Sin hallazgos nuevos. |
 
-**Nota sobre la etapa ⑤:** el mensaje de aprobación decía «453 de 453 pruebas pasan; `clean-backups` con `--older-than 0` sobre una carpeta de prueba borró los respaldos sin dejar `.borrando`», seguido de «(ajusta al resultado real)». Parece una plantilla. Hay que confirmar con el usuario el resultado exacto en Windows antes de citarlo en el PR.
+**Pendiente del usuario:** la prueba manual de `clean-backups` en Windows sobre una carpeta de prueba (por ejemplo con `--older-than 0`) todavía no se ha hecho. No hay que citarla como verificada hasta que el usuario la confirme.
 
 ## 4. Pendientes
 
@@ -122,7 +122,7 @@ El escaneo (`scanner.iter_folders`) y la planificación (`plan.jsonl` en disco) 
 - Abrir un PR independiente desde `claude/adoring-cerf-o8xdvp` hacia `master`, **sin fusionarlo**. Antes, buscar una plantilla de PR en el repositorio.
 
 ### Ideas anotadas (sin implementar)
-- Detectar «letras de relleno», por ejemplo letras que solo contienen URLs repetidas, publicidad o créditos de la web de origen. Por ahora solo es una idea; no forma parte de ninguna etapa aprobada.
+- Detectar letras que en realidad son publicidad o créditos de la web de origen, por ejemplo una URL que se repite en muchos archivos. Es solo una idea sin implementar y no forma parte de ninguna etapa.
 
 ## 5. Cómo ejecutar las pruebas
 
