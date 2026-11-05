@@ -59,7 +59,8 @@ app = typer.Typer(
 
 BANNER_WIDTH = 40
 BANNER_ENV = "CHOCONOSTLE_NO_BANNER"
-BANNER_COMMANDS = ["scan", "normalize-lyrics", "convert-lyrics", "fix-gallery", "revert", "clean-backups"]
+BANNER_COMMANDS = ["scan", "normalize-lyrics", "convert-lyrics", "revert", "recover", "clean-backups",
+                   "fix-gallery", "welcome", "version"]
 
 
 def banner_lines() -> list[str]:

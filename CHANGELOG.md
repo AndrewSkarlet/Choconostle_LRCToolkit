@@ -1,6 +1,14 @@
 # Changelog
 
-## Sin publicar
+## v1.0.0-rc1
+
+Versión candidata (`1.0.0rc1` en `pyproject.toml` y `config.py`).
+
+### Cambiado (commit 1: textos y empaquetado, sin cambios de lógica)
+- Versión 1.0.0rc1 y clasificador «Development Status :: 4 - Beta».
+- `pyproject.toml`: licencia como cadena SPDX (`license = "MIT"`), sin el clasificador de licencia y con `setuptools>=77` para construir (compatible con `requires-python = ">=3.9"`: setuptools 77 requiere Python 3.9 o posterior). `pip install -e .` ya no muestra los avisos de licencia. `LICENSE` no cambia.
+- El banner lista todos los comandos de la ayuda: scan, normalize-lyrics, convert-lyrics, revert, recover, clean-backups, fix-gallery, welcome y version.
+- `scan`: la sección «Letras a corregir en la Fase 2» pasa a «Letras con cabeceras u otros problemas», y la nota sobre Poweramp se sustituye por «normalize-lyrics y convert-lyrics pueden corregirlas».
 
 ### Agregado
 - Comando `fix-gallery`: crea un `.nomedia` vacío en las carpetas de álbum para que las apps de galería no muestren las portadas. No abre ni modifica audio, letras ni etiquetas.
@@ -17,9 +25,6 @@
 - Sin argumentos ya no se muestra la ayuda en una terminal interactiva, sino el banner (la ayuda sigue con `--help`, `--no-banner` o con la salida redirigida).
 - Nombre del autor: «AndrewSkarlet» en `LICENSE` (línea de Copyright), `pyproject.toml`, `config.py`, las cabeceras del código y el README.
 - `run.fatal_kind` acepta `backups=False` para no exigir la carpeta de respaldos (`fix-gallery` en simulación no la crea).
-
-### Pendiente
-- `pyproject.toml` usa el formato antiguo `license = { text = "MIT" }`. Las versiones recientes de setuptools prefieren `license = "MIT"` (SPDX). Se deja igual hasta que se decida cambiarlo.
 
 ## v0.3.0 - Fase 2.1: normalización segura, conversión de letras y escalabilidad
 

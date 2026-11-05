@@ -2,7 +2,7 @@
 
 Toolkit para analizar, reparar y organizar bibliotecas musicales con archivos LRC.
 
-Versión actual: **0.3.0 (Xoconostle)**.
+Versión actual: **1.0.0rc1 (Xoconostle)**, versión candidata.
 
 - **Fase 1, `scan`:** escaneo y reporte. No modifica nada.
 - **Fase 2, `normalize-lyrics` y `revert`:** quita o estandariza las cabeceras de las letras, con respaldo y reversión.

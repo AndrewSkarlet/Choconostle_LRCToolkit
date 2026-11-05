@@ -108,7 +108,10 @@ def _banner_check(output: str) -> None:
     assert all(line.isascii() and len(line) <= 40 for line in lines)
     text = " ".join(line.strip("|+- ") for line in lines)
     assert APP_NAME in text and APP_VERSION in text and f"({APP_CODENAME})" in text
-    assert "scan" in text and "fix-gallery" in text and "--apply" in text
+    for name in ["scan", "normalize-lyrics", "convert-lyrics", "revert", "recover", "clean-backups",
+                 "fix-gallery", "welcome", "version"]:
+        assert f"| {name}" in output.replace("|   ", "| "), name
+    assert "--apply" in text
 
 
 @pytest.fixture
@@ -155,3 +158,10 @@ def test_banner_not_shown_when_redirected():
 
 def test_banner_lines_ascii_and_narrow():
     assert all(line.isascii() and len(line) <= 40 for line in cli.banner_lines())
+
+
+def test_banner_lists_every_command_in_help():
+    """El banner lista todos los comandos que muestra la ayuda."""
+    import typer.main
+    names = set(typer.main.get_command(app).commands)
+    assert names == set(cli.BANNER_COMMANDS)
