@@ -11,6 +11,7 @@ Uso:
     choconostle revert CARPETA_DE_RESPALDO
     choconostle recover CARPETA_DE_RESPALDO
     choconostle clean-backups RUTA --older-than DÍAS [--apply]
+    choconostle fix-gallery RUTA [--all-folders] [--include-root] [--remove] [--apply]
     choconostle version
 
 Autor: Andrew
@@ -19,7 +20,9 @@ Licencia: MIT
 
 from __future__ import annotations
 
+import os
 import shutil
+import stat
 import sys
 from enum import Enum
 from pathlib import Path
@@ -45,7 +48,7 @@ from choconostle.report import (
 )
 from choconostle.scanner import LibraryScan, count_files, scan_directory
 from choconostle.textio import EncodingOptionError, parse_target_encoding
-from choconostle.utils import format_size
+from choconostle.utils import format_size, long_path
 from rich.text import Text
 
 app = typer.Typer(
@@ -699,6 +702,173 @@ def clean_backups(
         print_copyable(console, f'choconostle clean-backups "{path}" --older-than {older_than} --apply')
         raise typer.Exit(code=3)
     if failed:
+        raise typer.Exit(code=1)
+
+
+class _GalleryProgress:
+    """Progreso de fix-gallery: carpetas encontradas y luego «N de M»."""
+
+    def __init__(self, console: Console, enabled: bool):
+        self.enabled = enabled
+        self.console = console
+        self.progress = None
+        self.task = None
+
+    def _open(self, *columns, description: str, total) -> None:
+        self.stop()
+        if not self.enabled:
+            return
+        self.progress = Progress(*columns, console=self.console, transient=True)
+        self.progress.start()
+        self.task = self.progress.add_task(description, total=total)
+
+    def searching(self) -> None:
+        self._open(SpinnerColumn(), TextColumn("{task.description}"), description="Buscando carpetas...",
+                   total=None)
+
+    def found(self, count: int) -> None:
+        if self.progress is not None:
+            self.progress.update(self.task, description=f"Buscando carpetas... {count}")
+
+    def start(self, description: str, total: int) -> None:
+        self._open(SpinnerColumn(), TextColumn("{task.description}"), BarColumn(), MofNCompleteColumn(),
+                   TimeElapsedColumn(), description=description, total=total)
+
+    def advance(self, count: int) -> None:
+        if self.progress is not None:
+            self.progress.update(self.task, advance=count)
+
+    def stop(self) -> None:
+        if self.progress is not None:
+            self.progress.stop()
+            self.progress = None
+
+
+def _print_list(console: Console, title: str, items: list[str], limit: int) -> None:
+    console.print(f"{title} ({len(items)}):", markup=False)
+    shown = items if not limit else items[:limit]
+    for item in shown:
+        print_copyable(console, f"  {item}")
+    if len(shown) < len(items):
+        console.print(f"  ... y {len(items) - len(shown)} más (usa --limit 0 para verlas todas)", markup=False)
+
+
+@app.command("fix-gallery")
+def fix_gallery(
+    path: Path = typer.Argument(..., help="Carpeta de la biblioteca musical (o de un álbum)."),
+    apply: bool = typer.Option(
+        False, "--apply",
+        help="Crea (o, con --remove, quita) los .nomedia. Sin esta opción solo se simula.",
+    ),
+    all_folders: bool = typer.Option(
+        False, "--all-folders",
+        help="Pone .nomedia en todas las carpetas con audio, tengan o no imágenes.",
+    ),
+    include_root: bool = typer.Option(
+        False, "--include-root",
+        help="Incluye la carpeta raíz indicada y las carpetas Music, Pictures, DCIM y Download.",
+    ),
+    remove: bool = typer.Option(
+        False, "--remove",
+        help="Quita solo los .nomedia que creó fix-gallery (nunca los que ya existían).",
+    ),
+    only: Optional[List[str]] = typer.Option(
+        None, "--only", "-o", help="Limita a una carpeta (ruta) o álbum (nombre). Se puede repetir.",
+    ),
+    limit: int = typer.Option(
+        20, "--limit", "-l", help="Máximo de carpetas por lista en pantalla (0 = todas).",
+    ),
+    include_hidden: bool = typer.Option(
+        False, "--include-hidden", help="Incluye carpetas ocultas (que empiezan con '.').",
+    ),
+    no_progress: bool = typer.Option(False, "--no-progress", help="No muestra el progreso."),
+) -> None:
+    """Crea .nomedia en las carpetas de álbum para que las galerías no muestren las portadas."""
+    from choconostle import gallery
+
+    _safe_streams()
+    console = Console(highlight=False)
+    error_console = Console(stderr=True, highlight=False)
+    path = path.expanduser()
+    try:
+        is_dir = stat.S_ISDIR(os.stat(long_path(path)).st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        is_dir = False
+    except OSError as exc:
+        print_copyable(error_console, f"La unidad no está accesible ({exc}). Vuelve a ejecutar fix-gallery "
+                                      f"cuando esté conectada.", "red")
+        raise typer.Exit(code=3)
+    if not is_dir:
+        print_copyable(error_console, f"No es una carpeta: {path}", "red")
+        raise typer.Exit(code=2)
+    if remove and (all_folders or include_root):
+        error_console.print("--remove no se combina con --all-folders ni con --include-root.", style="red",
+                            markup=False)
+        raise typer.Exit(code=2)
+    progress = _GalleryProgress(error_console, enabled=not no_progress and error_console.is_terminal)
+    if remove:
+        result = gallery.run_remove(path, only or [], apply=apply, include_hidden=include_hidden,
+                                    progress=progress)
+    else:
+        result = gallery.run_create(path, only or [], apply=apply, all_folders=all_folders,
+                                    include_root=include_root, include_hidden=include_hidden, progress=progress)
+    if result.missing_albums:
+        error_console.print(f"No se encontró una carpeta ni un álbum llamado: {', '.join(result.missing_albums)}",
+                            style="red", markup=False)
+        raise typer.Exit(code=2)
+
+    action = "quitar" if remove else "crear"
+    title = ("APLICADO" if apply else "SIMULACIÓN (no se modificó nada)")
+    console.print(f"[bold]fix-gallery ({action} .nomedia) - {title}[/bold]")
+    print_copyable(console, f"Biblioteca: {path}")
+    if remove:
+        print_copyable(console, f"Lista de lo creado: {gallery.record_path(path)}")
+    else:
+        console.print("Modo: " + ("todas las carpetas con audio (--all-folders)" if all_folders
+                                  else "carpetas con imágenes"), markup=False)
+    if result.root_note:
+        console.print(result.root_note, style="yellow", markup=False)
+    console.print()
+    if remove:
+        _print_list(console, "Quitados" if apply else "Se quitarían", result.removed, limit)
+        if result.gone:
+            _print_list(console, "Ya no estaban", result.gone, limit)
+        if result.kept:
+            _print_list(console, "Se conservan", [f"{rel}: {why}" for rel, why in result.kept], limit)
+    else:
+        _print_list(console, "Creados" if apply else "Se crearían", result.created, limit)
+        if result.protected:
+            _print_list(console, "Omitidas por protección", [f"{rel}: {why}" for rel, why in result.protected],
+                        limit)
+    if result.errors:
+        console.print(f"Con error ({len(result.errors)}):", style="red", markup=False)
+        for rel, message in result.errors:
+            print_copyable(console, f"  {rel}: {message}", "red")
+    if result.record_error:
+        print_copyable(console, f"No se pudo guardar la lista de lo creado: {result.record_error}", "red")
+    console.print()
+    if remove:
+        console.print(f"Resumen: revisadas {result.reviewed}, {'quitadas' if apply else 'se quitarían'} "
+                      f"{len(result.removed)}, ya no estaban {len(result.gone)}, conservadas {len(result.kept)}, "
+                      f"con error {len(result.errors)}", markup=False)
+    else:
+        console.print(f"Resumen: carpetas revisadas {result.reviewed}, {'creadas' if apply else 'se crearían'} "
+                      f"{len(result.created)}, ya existentes {len(result.existing)}, omitidas {result.skipped} "
+                      f"(sin {'audio' if all_folders else 'imágenes'} {result.not_matching}, protegidas "
+                      f"{len(result.protected)}), con error {len(result.errors)}", markup=False)
+    if not apply and (result.removed if remove else result.created):
+        console.print("Para aplicarlo, repite el comando con --apply.", markup=False)
+    if result.stopped is not None:
+        console.print()
+        print_copyable(console, f"SE DETUVO: {result.stopped}", "bold red")
+        console.print("Vuelve a ejecutar cuando la unidad esté conectada; seguirá donde quedó:", markup=False)
+        args = ["choconostle", "fix-gallery", f'"{path}"']
+        args += [flag for flag, on in [("--all-folders", all_folders), ("--include-root", include_root),
+                                       ("--remove", remove), ("--apply", apply)] if on]
+        args += [f'--only "{value}"' for value in only or []]
+        print_copyable(console, " ".join(args))
+        raise typer.Exit(code=3)
+    if result.errors:
         raise typer.Exit(code=1)
 
 

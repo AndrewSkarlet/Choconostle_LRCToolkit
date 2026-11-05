@@ -1,5 +1,19 @@
 # Changelog
 
+## Sin publicar
+
+### Agregado
+- Comando `fix-gallery`: crea un `.nomedia` vacío en las carpetas de álbum para que las apps de galería no muestren las portadas. No abre ni modifica audio, letras ni etiquetas.
+  - Simulación por defecto y `--apply`. Solo en carpetas con imágenes (jpg, jpeg, png, webp, bmp, gif, sin distinguir mayúsculas) y sin `.nomedia`; `--all-folders` lo pone en todas las carpetas con audio.
+  - La carpeta indicada se omite si es una raíz (tiene subcarpetas con audio); si es un álbum, se trata como tal. `Music`, `Pictures`, `DCIM` y `Download` se omiten siempre. `--include-root` quita las dos protecciones.
+  - `--remove` quita solo lo que creó la herramienta, según `ChoconostleLRCTool_back/fix-gallery_creados.json`. Nunca borra un `.nomedia` que ya existía ni uno con contenido. `clean-backups` no borra esa lista.
+  - Idempotente, `--only`, rutas largas de Windows, código 3 si la unidad desaparece, barra «N de M» y resumen (revisadas, creadas, ya existentes, omitidas y con error).
+  - **⚠️ Advertencia:** las apps que leen el índice de medios del sistema (MediaStore) dejan de listar las canciones de las carpetas con `.nomedia`. Prueba con tu app de música en un álbum antes de aplicarlo a toda la biblioteca.
+- `tests/test_fix_gallery.py`, sobre copias de la biblioteca de `tools/generar_casos.py` con portadas añadidas (`cover.jpg`, `COVER.JPG`), en los modos «posix» y «windows».
+
+### Cambiado
+- `run.fatal_kind` acepta `backups=False` para no exigir la carpeta de respaldos (`fix-gallery` en simulación no la crea).
+
 ## v0.3.0 - Fase 2.1: normalización segura, conversión de letras y escalabilidad
 
 Sube la versión menor por las incompatibilidades con la v0.2.0 (ver cada etapa). Los resultados de las pruebas en Windows y Android están en la descripción del PR y en `docs/TRASPASO_FASE_2_1.md`.
