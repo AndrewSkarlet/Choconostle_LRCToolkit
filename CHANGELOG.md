@@ -1,15 +1,27 @@
 # Changelog
 
-## Sin publicar - Fase 2.1
+## v0.3.0 - Fase 2.1: normalización segura, conversión de letras y escalabilidad
 
-### Pendiente
-- Número de versión: se propone 0.3.0 por las incompatibilidades con la v0.2.0. No se cambia sin aprobación.
-- `tests/test_memoria.py` tarda entre 45 y 57 s en Windows, más de los 30 s previstos: reducirlo.
-- Verificación en Windows de la suite completa y del ciclo con FLAC reales sobre el commit de la etapa 6.
-- No probado: desconexión real de una SD, Termux/Android, el editor ID3 con MP3 reales con cabeceras, y las mediciones de rendimiento en Windows y en una SD.
+Sube la versión menor por las incompatibilidades con la v0.2.0 (ver cada etapa). Los resultados de las pruebas en Windows y Android están en la descripción del PR y en `docs/TRASPASO_FASE_2_1.md`.
+
+### Mejoras pendientes (sin implementar)
+- `revert` no muestra progreso y es más lento que `--apply` (14,5 s frente a 5,2 s con 28 archivos en una SD).
+  - Mostrar el avance «N de M» con un indicador animado en `revert`, `--resume` y `clean-backups`.
+  - Indicar el paso en curso en las fases largas de verificación.
+  - Investigar por qué `revert` tarda más.
+- `tests/test_memoria.py` tarda entre 45 y 57 s en Windows; se pidieron unos 30 s.
+- Tras una desconexión real, el resumen del paro mostró «Aplicadas 0 / Sin aplicar 42», aunque el error ocurrió en el 8.º FLAC de 21. Investigar si el resumen de reserva subcuenta lo confirmado en el diario.
+- El error real al desconectar fue `[Errno 22] Invalid argument`, que no estaba entre los simulados. Evaluar si debe reconocerse como posible desconexión.
+
+### No probado
+- Tarjeta SD desde el teléfono, bibliotecas grandes en el teléfono, `convert-lyrics` en Termux y uso de CPU y batería.
+- NAS y ARM, y charset-normalizer en Python puro fuera de Linux x86.
+- Disco lleno real (solo simulado) y el editor ID3 con MP3 reales con cabeceras.
+- `tools/medir_rendimiento.py` en Windows y en una SD.
 
 ### Etapa 7: documentación y PR
 - `.gitignore` excluye `ChoconostleLRCTool_back/` y las bibliotecas de prueba generadas.
+- Versión 0.3.0.
 
 ### Etapa 6: memoria y tiempo
 

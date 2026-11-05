@@ -4,7 +4,7 @@ Este documento sirve para que una sesión nueva continúe la Fase 2.1 sin ayuda 
 
 - **Rama:** `claude/adoring-cerf-o8xdvp`, creada desde `master` después de fusionar el PR #2. Todo se sube a esta rama.
 - **PR:** abierto en la etapa ⑦ desde esta rama contra `master`, **sin fusionar**. No fusionarlo nunca de forma automática.
-- **Estado:** etapas ① a ⑥ aprobadas por el usuario. La ⑦ (documentación y PR) está hecha y pendiente de revisión. Quedan pendientes las verificaciones del usuario y la versión (sección 4).
+- **Estado:** etapas ① a ⑥ aprobadas por el usuario. La ⑦ (documentación, PR y versión 0.3.0) está hecha; el PR sigue abierto y sin fusionar.
 
 ## 1. Estado de las etapas
 
@@ -97,9 +97,9 @@ Equipo del usuario: Windows, Python 3.15.1 y charset-normalizer 3.5.2 (rueda com
 
 | Etapa ⑥ (`2793277`) | `tests/test_memoria.py`: 3 de 3 (entre 45 y 57 s cada vez, más de los 30 s previstos; mejora pendiente) | Prueba manual de `clean-backups` sobre una carpeta de prueba: borró los respaldos sin problemas. |
 
-**Pendiente del usuario sobre `2793277`:** la suite completa y el ciclo con FLAC reales. No citarlos como verificados hasta que el usuario los confirme.
+**Confirmado después:** la suite completa (454/454 sobre `0ad99a7`) y el ciclo con FLAC reales. Ver la sección 4, etapa ⑦.
 
-**No probado:** la desconexión real de una SD (solo está simulada con `Unplug`), Termux/Android (solo se simula charset-normalizer en Python puro, en Linux), el editor ID3 con MP3 reales con cabeceras (solo MP3 generados), y las mediciones de rendimiento en Windows y en una SD (solo hay Linux en disco local).
+**No probado:** el editor ID3 con MP3 reales con cabeceras (solo MP3 generados), y las mediciones de rendimiento en Windows y en una SD (solo hay Linux en disco local).
 
 ## 4. Pendientes
 
@@ -109,7 +109,12 @@ Equipo del usuario: Windows, Python 3.15.1 y charset-normalizer 3.5.2 (rueda com
 
 ### Etapa ⑦: hecha, pendiente de revisión
 - PR abierto contra `master`, sin fusionar. La descripción del PR tiene el resumen por etapa, las incompatibilidades con la v0.2.0 y la tabla «verificado / simulado / no probado».
-- **Versión:** se propone 0.3.0 (sube la menor por las incompatibilidades). `pyproject.toml` y `config.py` siguen en 0.2.0 hasta que el usuario lo apruebe.
+- **Versión:** 0.3.0, aprobada por el usuario y aplicada en `pyproject.toml` y `config.py`.
+- **Verificado por el usuario después de `0ad99a7`:**
+  - Windows: suite 454/454 sobre `0ad99a7` (20 min 48 s); ciclo con 67 FLAC reales (98 archivos, 0 diferencias); `clean-backups` manual; rutas de 580 caracteres con `revert --latest`; SD exFAT por USB 2.0 (265 archivos, 0 diferencias); desconexión real de una SD FAT32 a mitad de `--apply --verify full` (código 3, `--resume` y `revert` correctos, 134 archivos con 0 diferencias, sin verificar audio y etiquetas tras el `--resume`).
+  - Android: Termux en un Moto Edge 60 Fusion, memoria interna, 159 FLAC (298 archivos idénticos por SHA-256 tras `revert`).
+  - El detalle está en la descripción del PR.
+- **Mejoras pendientes y lo no probado:** ver «v0.3.0» en `CHANGELOG.md`. No están implementadas.
 
 ### Ideas anotadas (sin implementar)
 - Detectar letras que en realidad son publicidad o créditos de la web de origen, por ejemplo una URL que se repite en muchos archivos. Es solo una idea sin implementar y no forma parte de ninguna etapa.
