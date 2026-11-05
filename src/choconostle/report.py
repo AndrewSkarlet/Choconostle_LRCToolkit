@@ -8,7 +8,7 @@ Responsabilidades:
 - Mostrar el reporte en la terminal.
 - Exportar el reporte completo a JSON (entrada para la Fase 2).
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 

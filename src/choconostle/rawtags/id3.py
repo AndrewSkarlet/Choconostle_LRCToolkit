@@ -11,7 +11,7 @@ letra).
   cabe en el relleno, la edición es una reescritura completa.
 - Cada valor de un TXXX de letra es un slot propio: nunca se unen.
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 

@@ -9,7 +9,7 @@ VORBIS_COMMENT y el relleno (bloque PADDING), que compensa la diferencia
 para que el audio no se mueva. Los demás bloques (STREAMINFO, PICTURE,
 SEEKTABLE...) y comentarios se copian sin tocar.
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 

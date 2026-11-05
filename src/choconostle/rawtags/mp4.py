@@ -17,7 +17,7 @@ por orden de preferencia, con:
 Si nada de eso es posible (moov antes de mdat, sin relleno), el archivo
 se omite: corregir los offsets del audio está fuera del alcance.
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 

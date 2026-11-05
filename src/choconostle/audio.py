@@ -10,7 +10,7 @@ Responsabilidades:
 - Indicar qué formatos admiten etiquetas y letras incrustadas.
 - Leer etiquetas, letras y portadas incrustadas (ver tags.py).
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 

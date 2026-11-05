@@ -10,7 +10,7 @@ Responsabilidades:
   también precedidas de caracteres invisibles (U+200B, U+FEFF...).
 - Detectar BOM y codificaciones distintas de UTF-8.
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 

@@ -1,4 +1,5 @@
 import json
+import pytest
 
 from typer.testing import CliRunner
 
@@ -90,3 +91,67 @@ def test_help_shows_header_brackets():
     assert result.exit_code == 0
     for text in ("[ar:]", "[ti:]", "[lr:]", "[hash:]", "[offset:]", "[length:]", "[xtrack:7]"):
         assert text in result.output, text
+
+
+# --- Banner de bienvenida ----------------------------------------------------
+
+import subprocess
+import sys
+
+from choconostle import cli
+from choconostle.config import APP_CODENAME, APP_NAME
+
+
+def _banner_check(output: str) -> None:
+    lines = [line for line in output.splitlines() if line.startswith(("+", "|"))]
+    assert lines, output
+    assert all(line.isascii() and len(line) <= 40 for line in lines)
+    text = " ".join(line.strip("|+- ") for line in lines)
+    assert APP_NAME in text and APP_VERSION in text and f"({APP_CODENAME})" in text
+    assert "scan" in text and "fix-gallery" in text and "--apply" in text
+
+
+@pytest.fixture
+def tty(monkeypatch):
+    monkeypatch.setattr(cli, "_interactive", lambda: True)
+    monkeypatch.delenv(cli.BANNER_ENV, raising=False)
+
+
+def test_banner_without_arguments(tty):
+    result = runner.invoke(app, [])
+    assert result.exit_code == 0, result.output
+    _banner_check(result.output)
+    result = runner.invoke(app, ["welcome"])
+    assert result.exit_code == 0, result.output
+    _banner_check(result.output)
+
+
+def test_banner_hidden_with_option_or_variable(tty):
+    for args, env in [(["--no-banner"], {}), (["--no-banner", "welcome"], {}), (["welcome", "--no-banner"], {}),
+                      ([], {cli.BANNER_ENV: "1"})]:
+        result = runner.invoke(app, args, env=env)
+        assert result.exit_code == 0, result.output
+        assert "+------" not in result.output
+        assert "Usage" in result.output  # muestra la ayuda en su lugar
+
+
+def test_banner_not_in_other_commands(tty):
+    result = runner.invoke(app, ["version"])
+    assert "+------" not in result.output
+
+
+def test_banner_not_shown_when_redirected():
+    # Salida real redirigida a un tubo (no es una terminal interactiva).
+    import os
+    from pathlib import Path
+    src = str(Path(__file__).resolve().parents[1] / "src")
+    env = {**os.environ, "COLUMNS": "100", "PYTHONPATH": src + os.pathsep + os.environ.get("PYTHONPATH", "")}
+    env.pop(cli.BANNER_ENV, None)
+    result = subprocess.run([sys.executable, "-m", "choconostle"], capture_output=True, text=True, env=env)
+    assert result.returncode == 0, result.stderr
+    assert "+------" not in result.stdout
+    assert "Usage" in result.stdout
+
+
+def test_banner_lines_ascii_and_narrow():
+    assert all(line.isascii() and len(line) <= 40 for line in cli.banner_lines())

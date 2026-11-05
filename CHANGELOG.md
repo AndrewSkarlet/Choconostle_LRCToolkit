@@ -9,10 +9,17 @@
   - `--remove` quita solo lo que creó la herramienta, según `ChoconostleLRCTool_back/fix-gallery_creados.json`. Nunca borra un `.nomedia` que ya existía ni uno con contenido. `clean-backups` no borra esa lista.
   - Idempotente, `--only`, rutas largas de Windows, código 3 si la unidad desaparece, barra «N de M» y resumen (revisadas, creadas, ya existentes, omitidas y con error).
   - **⚠️ Advertencia:** las apps que leen el índice de medios del sistema (MediaStore) dejan de listar las canciones de las carpetas con `.nomedia`. Prueba con tu app de música en un álbum antes de aplicarlo a toda la biblioteca.
+- Banner de bienvenida con `choconostle` sin argumentos o `choconostle welcome`: nombre, versión y nombre clave (igual que `choconostle version`), descripción, comandos y consejo. Solo ASCII y 40 columnas como máximo. No aparece en los demás comandos ni si la salida no es una terminal; `--no-banner` y `CHOCONOSTLE_NO_BANNER` lo apagan.
+- README: advertencia de hacer una copia antes de usar `--apply` y de ejecutar siempre primero la simulación.
 - `tests/test_fix_gallery.py`, sobre copias de la biblioteca de `tools/generar_casos.py` con portadas añadidas (`cover.jpg`, `COVER.JPG`), en los modos «posix» y «windows».
 
 ### Cambiado
+- Sin argumentos ya no se muestra la ayuda en una terminal interactiva, sino el banner (la ayuda sigue con `--help`, `--no-banner` o con la salida redirigida).
+- Nombre del autor: «AndrewSkarlet» en `LICENSE` (línea de Copyright), `pyproject.toml`, `config.py`, las cabeceras del código y el README.
 - `run.fatal_kind` acepta `backups=False` para no exigir la carpeta de respaldos (`fix-gallery` en simulación no la crea).
+
+### Pendiente
+- `pyproject.toml` usa el formato antiguo `license = { text = "MIT" }`. Las versiones recientes de setuptools prefieren `license = "MIT"` (SPDX). Se deja igual hasta que se decida cambiarlo.
 
 ## v0.3.0 - Fase 2.1: normalización segura, conversión de letras y escalabilidad
 

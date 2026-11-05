@@ -12,7 +12,7 @@ formato.
 - APEv2 (APE, WavPack): rawtags.apev2, byte a byte.
 - Matroska (.mka): solo lectura.
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 

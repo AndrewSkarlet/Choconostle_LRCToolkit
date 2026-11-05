@@ -7,7 +7,7 @@ Responsabilidad:
 - Definir las estructuras de datos del programa.
 - No contiene lógica de negocio.
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 

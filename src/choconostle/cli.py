@@ -13,8 +13,9 @@ Uso:
     choconostle clean-backups RUTA --older-than DÍAS [--apply]
     choconostle fix-gallery RUTA [--all-folders] [--include-root] [--remove] [--apply]
     choconostle version
+    choconostle [welcome] [--no-banner]
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 
@@ -54,8 +55,57 @@ from rich.text import Text
 app = typer.Typer(
     help=APP_DESCRIPTION,
     add_completion=False,
-    no_args_is_help=True,
 )
+
+BANNER_WIDTH = 40
+BANNER_ENV = "CHOCONOSTLE_NO_BANNER"
+BANNER_COMMANDS = ["scan", "normalize-lyrics", "convert-lyrics", "fix-gallery", "revert", "clean-backups"]
+
+
+def banner_lines() -> list[str]:
+    """Banner de bienvenida: solo ASCII y como máximo BANNER_WIDTH columnas."""
+    import textwrap
+    inner = BANNER_WIDTH - 4
+
+    def wrap(text: str) -> list[str]:
+        return textwrap.wrap(text, inner) or [""]
+    body = wrap(f"{APP_NAME} {APP_VERSION} ({APP_CODENAME})")  # lo mismo que "choconostle version"
+    body += [""] + wrap(APP_DESCRIPTION) + ["", "Comandos:"]
+    body += [f"  {name}" for name in BANNER_COMMANDS]
+    body += ["", *wrap("Consejo: empieza con scan; nada se modifica sin --apply."),
+             *wrap("Ayuda: choconostle --help")]
+    edge = "+" + "-" * (BANNER_WIDTH - 2) + "+"
+    lines = [edge] + [f"| {line.ljust(inner)} |" for line in body] + [edge]
+    # Cualquier carácter no ASCII (p. ej. una tilde en la descripción) se sustituye.
+    return [line.encode("ascii", "replace").decode("ascii") for line in lines]
+
+
+def _interactive() -> bool:
+    try:
+        return sys.stdout.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _show_banner_or_help(ctx: typer.Context, no_banner: bool) -> None:
+    import os as _os
+    if not no_banner and not _os.environ.get(BANNER_ENV) and _interactive():
+        typer.echo("\n".join(banner_lines()))
+    else:
+        typer.echo(ctx.find_root().get_help())
+
+
+@app.callback(invoke_without_command=True)
+def _main(
+    ctx: typer.Context,
+    no_banner: bool = typer.Option(
+        False, "--no-banner", help=f"No muestra el banner de bienvenida (también con la variable {BANNER_ENV}).",
+    ),
+) -> None:
+    """Toolkit para analizar, reparar y organizar bibliotecas musicales con archivos LRC."""
+    ctx.obj = {"no_banner": no_banner}
+    if ctx.invoked_subcommand is None:
+        _show_banner_or_help(ctx, no_banner)
 
 
 class GroupBy(str, Enum):
@@ -870,6 +920,15 @@ def fix_gallery(
         raise typer.Exit(code=3)
     if result.errors:
         raise typer.Exit(code=1)
+
+
+@app.command()
+def welcome(
+    ctx: typer.Context,
+    no_banner: bool = typer.Option(False, "--no-banner", help="No muestra el banner (muestra la ayuda)."),
+) -> None:
+    """Muestra el banner de bienvenida (solo en una terminal interactiva)."""
+    _show_banner_or_help(ctx, no_banner or bool((ctx.obj or {}).get("no_banner")))
 
 
 @app.command()

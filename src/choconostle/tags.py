@@ -11,7 +11,7 @@ Formatos de etiqueta:
 - APEv2 (APE, WavPack): Lyrics, Cover Art.
 - Matroska: LYRICS y adjuntos de imagen (ver matroska.py).
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 

@@ -16,7 +16,7 @@ originales de la letra y de los campos de tamaño o relleno que cambiaron
 (nunca portadas ni audio). revert los aplica al revés y comprueba con
 SHA-256 que la región de etiquetas queda idéntica a la original.
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 

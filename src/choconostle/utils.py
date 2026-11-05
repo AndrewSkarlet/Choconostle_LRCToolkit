@@ -3,7 +3,7 @@ utils.py
 
 Funciones auxiliares de formato.
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 

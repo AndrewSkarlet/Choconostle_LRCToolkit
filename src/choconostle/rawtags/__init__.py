@@ -20,7 +20,7 @@ Cada editor:
 Los parches son también el respaldo: aplicarlos al revés restaura la
 región original exacta sin guardar portadas ni audio.
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 

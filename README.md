@@ -23,6 +23,8 @@ Versión actual: **0.3.0 (Xoconostle)**.
 - **Formatos sin letras incrustadas** (WAV, AIFF, AAC/AC-3 sin contenedor): se indican como información, no como error. En esos casos usa un `.lrc` externo.
 - Archivos `.lrc` sin canción, audio no compatible (WMA, DSD...) y archivos que no se pudieron leer.
 
+> **⚠️ Antes de usar `--apply`, haz una copia de tu biblioteca.** Ejecuta siempre primero la simulación (el mismo comando sin `--apply`) y revisa qué cambiaría. La herramienta guarda respaldos de lo que modifica, pero una copia propia es la única protección ante cualquier imprevisto.
+
 ## Instalación
 
 Requiere Python 3.9 o superior.
@@ -74,6 +76,13 @@ python -m choconostle scan ~/Música      # sin instalar el comando
 | `--no-progress` | No muestra el indicador de progreso. |
 
 `choconostle version` muestra la versión.
+
+### Bienvenida
+
+`choconostle` sin argumentos, o `choconostle welcome`, muestra un banner corto con el nombre, la versión, la descripción, los comandos principales y un consejo («empieza con scan; nada se modifica sin --apply»). Es solo ASCII y mide como máximo 40 columnas, para Termux y las consolas de Windows con otra codificación.
+
+- No aparece con los demás comandos, ni cuando la salida no es una terminal interactiva (por ejemplo, redirigida a un archivo): en esos casos se muestra la ayuda.
+- `--no-banner` (`choconostle --no-banner`) o la variable de entorno `CHOCONOSTLE_NO_BANNER` (con cualquier valor) lo apagan.
 
 ## Normalizar letras (Fase 2)
 
@@ -473,4 +482,4 @@ Las pruebas de FLAC, MP3, WAV y APE generan los archivos en Python puro. Las de 
 
 ## Licencia
 
-MIT. Ver [LICENSE](LICENSE).
+MIT. Ver [LICENSE](LICENSE). Autor: AndrewSkarlet.

@@ -9,7 +9,7 @@ Responsabilidades:
 - Crear objetos Track y asociarles letras (.lrc / .txt) y portadas
   (Cover.jpg / Folder.jpg) de la misma carpeta.
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 

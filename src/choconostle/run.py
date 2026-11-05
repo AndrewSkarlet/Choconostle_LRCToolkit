@@ -27,7 +27,7 @@ Pasos de cada entrada (una interrupción en cualquiera se resuelve con
     1. copia de respaldo (fsync)   2. evento "intent" (fsync)
     3. escritura                    4. verificación     5. evento "done" (fsync)
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 

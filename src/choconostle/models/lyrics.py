@@ -8,7 +8,7 @@ Responsabilidad:
 - Almacenar el resultado del análisis de una letra.
 - No contiene lógica de análisis (ver lrc.py).
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 

@@ -10,7 +10,7 @@ cabecera y el pie; el orden de los campos se conserva (mutagen los
 ordena por tamaño). El archivo cambia de tamaño al final; el audio, que
 está antes, no se mueve.
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 
