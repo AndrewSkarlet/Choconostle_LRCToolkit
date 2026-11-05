@@ -11,8 +11,8 @@ from builders import add_id3, audio_payload, ffmpeg, has_encoder, make_flac, mak
 from choconostle import backup
 from choconostle.config import BACKUP_DIR_NAME
 from choconostle.normalizer import (
-    ENCODING_KEEP, MODE_STANDARDIZE, MODE_STRIP, STATUS_CHANGE, STATUS_NEARLY_EMPTY,
-    STATUS_SKIPPED, LyricsNormalizer, SelectionError, select,
+    ENCODING_KEEP, MODE_STANDARDIZE, MODE_STRIP, STATUS_CHANGE, STATUS_SKIPPED,
+    LyricsNormalizer, SelectionError, select,
 )
 from choconostle.scanner import scan_directory
 
@@ -87,7 +87,7 @@ def snapshot(root):
     return state
 
 
-def run(root, mode=MODE_STRIP, encoding="utf8", only=None):
+def run(root, mode=MODE_STRIP, encoding=ENCODING_KEEP, only=None):
     scan = scan_directory(root)
     tracks, orphans = select(scan, only or [])
     normalizer = LyricsNormalizer(mode, encoding)
@@ -114,7 +114,10 @@ def test_plan_covers_every_copy(library):
                 ("02 Dos.mp3", "USLT"), ("02 Dos.mp3", "SYLT"), ("02 Dos.mp3", "TXXX:LYRICS"),
                 ("05 Cinco.txt", "05 Cinco.txt"), ("huérfana.lrc", "huérfana.lrc"), ("06 Seis.wav", "USLT")]:
         assert changes[key].status == STATUS_CHANGE, key
-    assert changes[("04 Cuatro.flac", "LYRICS")].status == STATUS_NEARLY_EMPTY
+    # Casi vacía: se procesa con un aviso.
+    cuatro = changes[("04 Cuatro.flac", "LYRICS")]
+    assert cuatro.status == STATUS_CHANGE and cuatro.nearly_empty
+    assert any("Casi vacía" in warning for warning in cuatro.warnings)
 
 
 def test_apply_strip(library):
@@ -125,7 +128,8 @@ def test_apply_strip(library):
 
     expected = "[00:00.50]Primera\n[00:02.70]Segunda\n[00:04.50]Tercera\n"
     album = library / "Artista - Álbum"
-    assert (album / "01 Uno.lrc").read_bytes() == expected.encode()  # sin BOM, LF
+    # Se conservan el BOM y los saltos CRLF del archivo.
+    assert (album / "01 Uno.lrc").read_bytes() == codecs.BOM_UTF8 + expected.replace("\n", "\r\n").encode()
     from mutagen.flac import FLAC
     flac = FLAC(album / "01 Uno.flac")
     assert flac["LYRICS"] == [expected]
@@ -140,8 +144,10 @@ def test_apply_strip(library):
     assert id3.getall("TXXX:LYRICS")[0].text == ["[00:01.00]a\n[00:02.00]b\n[00:03.00]c"]
     assert audio_payload(album / "02 Dos.mp3") == before["Artista - Álbum/02 Dos.mp3#audio"]
 
-    assert (album / "05 Cinco.txt").read_bytes() == "Canción sin tiempos\nLínea dos\nLínea tres\n".encode()
-    assert FLAC(album / "04 Cuatro.flac")["LYRICS"] == ["[ar:A]\n[00:00.00]Instrumental"]
+    # Windows-1252: se conserva la codificación.
+    assert (album / "05 Cinco.txt").read_bytes() == \
+        "Canción sin tiempos\nLínea dos\nLínea tres\n".encode("cp1252")
+    assert FLAC(album / "04 Cuatro.flac")["LYRICS"] == ["[00:00.00]Instrumental"]
 
     # Segunda pasada: nada que cambiar. El escáner ignora la carpeta de respaldo.
     scan = scan_directory(library)
@@ -151,18 +157,22 @@ def test_apply_strip(library):
 
 
 def test_backup_contents(library):
+    from choconostle import run as runs
     normalizer, changes = run(library)
     session = normalizer.apply(changes, library)
     folder = session.folder
     assert folder.parent == library / BACKUP_DIR_NAME
-    manifest = json.loads((folder / backup.MANIFEST_NAME).read_text(encoding="utf-8"))
-    items = manifest["items"]
+    state = json.loads((folder / runs.STATE_NAME).read_text(encoding="utf-8"))
+    assert state["format"] == 3 and state["state"] == runs.STATE_COMPLETED
+    items = session.manifest["items"]
     assert len(items) == len([c for c in changes if c.status == STATUS_CHANGE])
-    for item in items:
-        assert (folder / item["original_copy"]).is_file()
-    lrc_item = next(item for item in items if item["path"].endswith("01 Uno.lrc"))
-    assert (folder / lrc_item["original_copy"]).read_bytes().startswith(codecs.BOM_UTF8)
-    log = (folder / backup.LOG_NAME).read_text(encoding="utf-8")
+    assert {item["status"] for item in items} == {backup.ITEM_APPLIED}
+    intents, done = session.outcome()
+    assert set(intents) == set(done)
+    lrc_record = next(r for r in session.plan_records() if r["path"].endswith("01 Uno.lrc"))
+    copy = folder / intents[lrc_record["id"]]["copy"]
+    assert copy.read_bytes().startswith(codecs.BOM_UTF8)
+    log = (folder / runs.LOG_NAME).read_text(encoding="utf-8")
     assert "choconostle revert" in log and "-[ti:Uno]" in log
     # No se copian archivos de audio.
     assert not [p for p in folder.rglob("*") if p.suffix in (".flac", ".mp3", ".wav")]
@@ -238,12 +248,16 @@ def test_apply_skips_files_changed_after_plan(library):
     assert lrc.read_text(encoding="utf-8") == "cambiado\n"
 
 
-def test_encoding_keep(library):
-    _normalizer, changes = run(library, encoding=ENCODING_KEEP)
+def test_encoding_utf8_conversion(library):
+    _normalizer, changes = run(library, encoding="utf8")
     changes = by_label(changes)
-    assert changes[("01 Uno.lrc", "01 Uno.lrc")].new_bytes.startswith(codecs.BOM_UTF8)
-    assert changes[("05 Cinco.txt", "05 Cinco.txt")].new_bytes == \
-        "Canción sin tiempos\nLínea dos\nLínea tres\n".encode("cp1252")
+    # Quita el BOM, pero los saltos CRLF no se tocan (eso es convert-lyrics --eol).
+    assert changes[("01 Uno.lrc", "01 Uno.lrc")].new_bytes == \
+        "[00:00.50]Primera\r\n[00:02.70]Segunda\r\n[00:04.50]Tercera\r\n".encode()
+    assert "quita BOM" in changes[("01 Uno.lrc", "01 Uno.lrc")].details
+    # Windows-1252 frente a Windows-1250 es ambiguo: no se convierte.
+    cinco = changes[("05 Cinco.txt", "05 Cinco.txt")]
+    assert cinco.status == STATUS_SKIPPED and "--source-encoding" in cinco.message
 
 
 def test_only_folder_and_album(library):
@@ -277,11 +291,11 @@ def test_m4a_and_wavpack_apply_and_revert(tmp_path):
     before = snapshot(root)
     normalizer, changes = run(root)
     changes_by = by_label(changes)
-    assert changes_by[("a.m4a", "\xa9lyr")].new_text == "[00:01.00]a\n[00:02.00]b\n[00:03.00]c"
+    assert changes_by[("a.m4a", "\xa9lyr")].new_text == "[00:01.00]a\r\n[00:02.00]b\r\n[00:03.00]c"
     assert changes_by[("b.wv", "Lyrics")].status == STATUS_CHANGE
     assert changes_by[(mka.name, "(incrustada)")].status == STATUS_SKIPPED
     session = normalizer.apply(changes, root)
-    assert MP4(m4a)["\xa9lyr"] == ["[00:01.00]a\n[00:02.00]b\n[00:03.00]c"]
+    assert MP4(m4a)["\xa9lyr"] == ["[00:01.00]a\r\n[00:02.00]b\r\n[00:03.00]c"]
     assert MP4(m4a)["\xa9nam"] == ["Título"]
     backup.revert(session.folder)
     assert snapshot(root) == before

@@ -20,3 +20,8 @@ reporte*.json
 Thumbs.db
 .vscode/
 .idea/
+
+# Respaldos de choconostle y bibliotecas de prueba generadas
+ChoconostleLRCTool_back/
+Choconostle_Casos_LRC/
+choconostle_medicion_*/

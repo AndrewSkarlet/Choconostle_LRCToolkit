@@ -1,26 +1,27 @@
-import codecs
-
-import pytest
-
 from choconostle.models.track import Track
 from choconostle.normalizer import (
-    ENCODING_KEEP, ENCODING_UTF8, ENCODING_UTF8_BOM, MODE_STANDARDIZE, MODE_STRIP,
-    LyricsEncodingError, build_headers, encode_lyrics_file, looks_like_latin_text,
-    normalize_text, shift_line,
+    MODE_STANDARDIZE, MODE_STRIP, OFFSET_FIRST, OFFSET_LAST, OFFSET_SUM, build_headers,
+    header_lines, normalize_sylt, normalize_text, parse_offset, shift_line,
 )
 
 BODY = "[00:01.00]Uno\n[00:02.00]Dos\n[00:03.00]Tres\n"
 
 
-def strip(text):
-    return normalize_text(text, MODE_STRIP, [])
+def strip(text, **options):
+    return normalize_text(text, MODE_STRIP, **options)
 
 
 def test_strip_removes_headers_and_keeps_timestamps():
     result = strip("[ti:T]\n[ar:A]\n[by:B]\n[al:X]\n[length:03:00]\n[re:x]\n[ve:1]\n" + BODY)
     assert result.text == BODY
     assert result.removed_headers == ["ti", "ar", "by", "al", "length", "re", "ve"]
-    assert result.synced
+    assert result.synced and result.changed
+
+
+def test_lr_and_hash_are_known_headers():
+    result = strip("[lr:Letrista]\n[hash:abc123]\n" + BODY)
+    assert result.text == BODY
+    assert result.removed_headers == ["lr", "hash"]
 
 
 def test_strip_headers_anywhere_and_leading_blank_lines():
@@ -28,10 +29,83 @@ def test_strip_headers_anywhere_and_leading_blank_lines():
     assert result.text == BODY
 
 
+def test_blank_lines_inside_lyrics_are_kept():
+    text = "[ti:T]\n\n\n[00:01.00]Uno\n\n[00:02.00]Dos\n\n\n[00:03.00]Tres\n"
+    assert strip(text).text == "[00:01.00]Uno\n\n[00:02.00]Dos\n\n\n[00:03.00]Tres\n"
+
+
+def test_no_headers_means_no_change():
+    result = strip(BODY)
+    assert not result.changed
+    assert result.text == BODY
+
+
+# --- Saltos de línea y caracteres ------------------------------------------
+
+def test_crlf_cr_and_mixed_newlines_are_preserved():
+    for eol in ("\r\n", "\r"):
+        text = f"[ti:T]{eol}" + BODY.replace("\n", eol)
+        assert strip(text).text == BODY.replace("\n", eol)
+    mixed = "[ti:T]\r\n[ar:A]\n\r\n[00:01.00]Uno\r[00:02.00]Dos\n[00:03.00]Tres\r\n[00:04.00]Cuatro"
+    assert strip(mixed).text == "[00:01.00]Uno\r[00:02.00]Dos\n[00:03.00]Tres\r\n[00:04.00]Cuatro"
+
+
+def test_unicode_line_separators_are_content():
+    # U+2028, U+0085 y \x0c no son saltos de línea en LRC.
+    text = "[ti:T]\n[00:01.00]Uno sigue\n[00:02.00]Dos\x85\n[00:03.00]Tres\x0c\n"
+    result = strip(text)
+    assert result.text == "[00:01.00]Uno sigue\n[00:02.00]Dos\x85\n[00:03.00]Tres\x0c\n"
+    assert result.content_lines == 3
+
+
+def test_invisible_prefix_removed_only_with_header():
+    for char in "​﻿‎‏⁠":
+        result = strip(f"{char}[ti:T]\n" + BODY)
+        assert result.text == BODY, repr(char)
+    # En la letra no se tocan.
+    text = "[ti:T]\n[00:01.00]Uno​\n​[00:02.00]Dos\n[00:03.00]Tres﻿\n"
+    assert strip(text).text == "[00:01.00]Uno​\n​[00:02.00]Dos\n[00:03.00]Tres﻿\n"
+
+
+def test_leading_feff_kept_when_not_followed_by_header():
+    text = "﻿" + BODY
+    result = strip(text)
+    assert not result.changed
+    assert result.text == text
+
+
+def test_spaces_inside_brackets_are_not_headers():
+    text = "[ ti : Con espacios ]\n" + BODY
+    result = strip(text)
+    assert result.text == text
+    assert result.removed_headers == []
+
+
 def test_section_labels_are_kept():
     text = "[Coro: Artista]\n" + BODY
-    assert strip(text).text == text
+    result = strip(text)
+    assert result.text == text
+    assert result.unknown_headers == ["Coro"]
+    assert strip("[00:00.50]x\n[Coro: Artista]\n" + BODY).unknown_headers == []
 
+
+# --- Cabeceras desconocidas --------------------------------------------------
+
+def test_unknown_headers_kept_by_default_and_listed():
+    text = "[ti:T]\n[xtrack:7]\n\n" + BODY
+    result = strip(text)
+    assert result.text == "[xtrack:7]\n\n" + BODY
+    assert result.unknown_headers == ["xtrack"]
+
+
+def test_strip_unknown_headers_only_in_initial_block():
+    text = "[xtrack:7]\n[ti:T]\n\n" + BODY + "[otra:cosa]\n"
+    result = strip(text, strip_unknown=True)
+    assert result.text == BODY + "[otra:cosa]\n"
+    assert result.removed_unknown == ["xtrack"]
+
+
+# --- Offsets --------------------------------------------------------------
 
 def test_positive_offset_makes_lyrics_earlier():
     result = strip("[offset:+500]\n[00:01.00]Uno\n[00:03.20]Dos\n[01:00.00]Tres\n")
@@ -45,10 +119,16 @@ def test_negative_offset_makes_lyrics_later():
     assert result.text == "[01:00.50]Uno\n[00:03.50]Dos\n[00:04.50]Tres\n"
 
 
-def test_offset_clamps_to_zero():
+def test_offset_clamps_to_zero_with_warning():
     result = strip("[offset:2000]\n[00:01.00]Uno\n[00:03.00]Dos\n[00:04.00]Tres\n")
-    assert result.text.splitlines()[0] == "[00:00.00]Uno"
+    assert result.text.split("\n")[0] == "[00:00.00]Uno"
     assert result.clamped == 1
+    assert any("00:00" in warning for warning in result.warnings)
+
+
+def test_offset_applies_to_word_timestamps_and_keeps_crlf():
+    text = "[offset:+500]\r\n[00:01.00]<00:01.00>Uno <00:01.40>dos\r\n[00:02.00]b\r\n[00:03.00]c\r\n"
+    assert strip(text).text == "[00:00.50]<00:00.50>Uno <00:00.90>dos\r\n[00:01.50]b\r\n[00:02.50]c\r\n"
 
 
 def test_offset_keeps_timestamp_style():
@@ -62,27 +142,46 @@ def test_offset_on_timestamp_without_fraction():
     assert shift_line("[00:05]x", 250)[0] == "[00:04.75]x"
 
 
-def test_offset_does_not_touch_brackets_inside_text():
-    assert shift_line("[00:05.00]Canción [1:30] en vivo", 1000)[0] == "[00:04.00]Canción [1:30] en vivo"
+def test_parse_offset():
+    assert parse_offset("+500") == 500
+    assert parse_offset(" -300 ") == -300
+    assert parse_offset("250") == 250
+    assert parse_offset("medio segundo") is None
+    assert parse_offset("") is None
+    assert parse_offset("1.5") is None
 
 
-def test_invalid_offset_is_removed_without_shifting():
-    result = strip("[offset:abc]\n" + BODY)
-    assert result.text == BODY
-    assert result.shifted == 0
-    assert result.warnings
+def test_invalid_offset_is_never_applied():
+    text = "[ti:T]\n[offset:medio segundo]\n" + BODY
+    for policy in ("skip", OFFSET_FIRST, OFFSET_LAST, OFFSET_SUM):
+        result = strip(text, offset_policy=policy)
+        assert result.decision and "inválido" in result.decision
+        assert result.text == text and not result.changed
 
 
-def test_unsynced_with_headers_only_loses_headers():
-    result = strip("[ar:A]\nLínea uno\nLínea dos\nLínea tres\n")
-    assert result.text == "Línea uno\nLínea dos\nLínea tres\n"
-    assert not result.synced
+def test_two_offsets_require_decision_by_default():
+    text = "[offset:+100]\n[offset:+400]\n" + BODY
+    result = strip(text)
+    assert result.decision and "--offset-policy" in result.decision
+    assert result.text == text
 
 
-def test_unsynced_without_headers_is_unchanged():
-    text = "Línea uno\nLínea dos\nLínea tres"
-    for mode in (MODE_STRIP, MODE_STANDARDIZE):
-        assert normalize_text(text, mode, [("ar", "A")]).text == text
+def test_two_offsets_with_policy():
+    text = "[offset:+100]\n[offset:+400]\n[00:01.00]Uno\n[00:02.00]Dos\n[00:03.00]Tres\n"
+    assert strip(text, offset_policy=OFFSET_FIRST).text.startswith("[00:00.90]Uno")
+    assert strip(text, offset_policy=OFFSET_LAST).text.startswith("[00:00.60]Uno")
+    result = strip(text, offset_policy=OFFSET_SUM)
+    assert result.text == "[00:00.50]Uno\n[00:01.50]Dos\n[00:02.50]Tres\n"
+    assert result.offset_ms == 500
+
+
+def test_offset_not_applied_with_invalid_or_inline_timestamps():
+    invalid = "[offset:500]\n[00:01.00]Uno\n[00:61.00]Dos\n[00:03.00]Tres\n"
+    assert "inválida" in strip(invalid).decision
+    qq = "[offset:500]\n[00:01.00]Esta[00:01.40]es\n[00:02.00]Dos\n[00:03.00]Tres\n"
+    assert "QQ" in strip(qq).decision
+    # Sin offset, esos archivos se procesan normalmente.
+    assert strip("[ti:x]\n" + qq.split("\n", 1)[1]).decision is None
 
 
 def test_offset_is_not_applied_to_unsynced_lyrics():
@@ -91,40 +190,52 @@ def test_offset_is_not_applied_to_unsynced_lyrics():
     assert result.shifted == 0
 
 
-def test_newlines_are_normalized():
-    result = strip(BODY.replace("\n", "\r\n"))
-    assert result.text == BODY
-    assert result.newline == "CRLF"
+# --- Casi vacías y vacías -----------------------------------------------------
 
-
-def test_embedded_bom_char_is_removed():
-    result = strip("﻿" + BODY)
-    assert result.text == BODY
-    assert result.removed_bom
-
-
-def test_nearly_empty_is_untouched():
-    text = "[ar:A]\n[offset:500]\n[00:00.00]Instrumental\n[00:10.00]\n"
-    result = strip(text)
+def test_nearly_empty_is_processed_with_warning():
+    result = strip("[ar:A]\n[00:00.00]Instrumental\n")
     assert result.nearly_empty
-    assert result.text == text
+    assert result.text == "[00:00.00]Instrumental\n"
+    assert any("Casi vacía" in warning for warning in result.warnings)
 
+
+def test_only_headers_would_be_empty():
+    result = strip("[ti:Solo]\n[ar:A]\n[by:B]\n")
+    assert result.empty_result
+    assert not strip("").changed
+    assert not strip("   \n\n").empty_result
+
+
+def test_timestamps_without_text_are_not_empty():
+    result = strip("[ti:x]\n[00:01.00]\n[00:04.50]\n")
+    assert not result.empty_result
+    assert result.text == "[00:01.00]\n[00:04.50]\n"
+
+
+# --- Estandarizar ---------------------------------------------------------
 
 def test_standardize_writes_fixed_block_without_duplicates():
     headers = [("ar", "Artista"), ("ti", "Título"), ("al", "Álbum"), ("length", "03:20")]
+    block = header_lines(headers)
     text = "[ti:viejo]\n[ar:Artista]\n[by:LRCGet]\n[offset:+100]\n" + BODY
-    result = normalize_text(text, MODE_STANDARDIZE, headers)
+    result = normalize_text(text, MODE_STANDARDIZE, block)
     assert result.text == (
         "[ar:Artista]\n[ti:Título]\n[al:Álbum]\n[length:03:20]\n"
         "[00:00.90]Uno\n[00:01.90]Dos\n[00:02.90]Tres\n"
     )
     # Idempotente: una segunda pasada no cambia nada.
-    assert normalize_text(result.text, MODE_STANDARDIZE, headers).text == result.text
+    assert not normalize_text(result.text, MODE_STANDARDIZE, block).changed
 
 
-def test_standardize_adds_headers_to_synced_lyrics_without_headers():
-    result = normalize_text(BODY, MODE_STANDARDIZE, [("ti", "T")])
-    assert result.text == "[ti:T]\n" + BODY
+def test_standardize_uses_file_newlines():
+    result = normalize_text(BODY.replace("\n", "\r\n"), MODE_STANDARDIZE, ["[ti:T]"])
+    assert result.text == "[ti:T]\r\n" + BODY.replace("\n", "\r\n")
+
+
+def test_unsynced_without_headers_is_unchanged():
+    text = "Línea uno\nLínea dos\nLínea tres"
+    for mode in (MODE_STRIP, MODE_STANDARDIZE):
+        assert normalize_text(text, mode, ["[ar:A]"]).text == text
 
 
 def test_build_headers_never_invents_data():
@@ -138,41 +249,47 @@ def test_build_headers_never_invents_data():
     assert build_headers(None) == []
 
 
-def test_encode_utf8_default_and_bom():
-    assert encode_lyrics_file("ñ\n", ENCODING_UTF8, "utf-8", True)[0] == "ñ\n".encode()
-    data, encoding, bom, _ = encode_lyrics_file("ñ\n", ENCODING_UTF8_BOM, "utf-8", False)
-    assert data == codecs.BOM_UTF8 + "ñ\n".encode()
-    assert bom
+# --- SYLT -----------------------------------------------------------------
+
+def test_sylt_removes_header_entries_only():
+    entries = [("[ti:x]", 0), ("﻿Uno", 1000), ("Dos", 2000), ("Tres", 3000)]
+    result = normalize_sylt(entries)
+    assert result.entries == entries[1:]
+    assert result.removed_headers == ["ti"]
 
 
-def test_encode_converts_cp1252_to_utf8():
-    data, encoding, _, warnings = encode_lyrics_file("Canción ¿qué?\n", ENCODING_UTF8, "cp1252", False)
-    assert data == "Canción ¿qué?\n".encode()
-    assert not warnings
+def test_sylt_with_offset_requires_decision():
+    result = normalize_sylt([("[offset:100]", 0), ("Uno", 1000), ("Dos", 2000), ("Tres", 3000)])
+    assert result.decision
 
 
-def test_encode_keep():
-    assert encode_lyrics_file("Canción\n", ENCODING_KEEP, "cp1252", False)[0] == "Canción\n".encode("cp1252")
-    data = encode_lyrics_file("x\n", ENCODING_KEEP, "utf-16-le", True)[0]
-    assert data == codecs.BOM_UTF16_LE + "x\n".encode("utf-16-le")
-    assert encode_lyrics_file("x\n", ENCODING_KEEP, "ascii", False)[0] == b"x\n"
+def test_strip_unknown_never_touches_lines_inside_lyrics():
+    from choconostle.textio import diff_lines
+    synced = ("[xtrack:7]\n[ti:T]\n\n[00:01.00]Uno\n[Coro: Artista]\n[00:02.00]Dos\n"
+              "[clave:valor]\n[00:03.00]Tres\n")
+    result = strip(synced, strip_unknown=True)
+    assert result.text == "[00:01.00]Uno\n[Coro: Artista]\n[00:02.00]Dos\n[clave:valor]\n[00:03.00]Tres\n"
+    assert result.removed_unknown == ["xtrack"]
+    # Todo lo que se quita aparece en el diff; lo que se conserva, no.
+    diff = diff_lines(synced, result.text)
+    assert [line for line in diff if line.startswith("-")] == ["-[xtrack:7]", "-[ti:T]", "-"]
+    assert not [line for line in diff if line.startswith("+")]
+
+    unsynced = "[xtrack:7]\nPrimera línea\n[Coro: Artista]\nSegunda\nTercera\n"
+    result = strip(unsynced, strip_unknown=True)
+    assert result.text == "Primera línea\n[Coro: Artista]\nSegunda\nTercera\n"
 
 
-def test_encode_keep_fails_when_text_does_not_fit():
-    with pytest.raises(LyricsEncodingError):
-        encode_lyrics_file("[ti:東京]\n", ENCODING_KEEP, "cp1252", False)
+def test_initial_block_spans_blank_lines_until_first_lyric_line():
+    text = "[ti:T]\n\n[xtrack:7]\n\n[00:01.00]Uno\n[00:02.00]Dos\n[00:03.00]Tres\n"
+    assert strip(text, strip_unknown=True).text == "[00:01.00]Uno\n[00:02.00]Dos\n[00:03.00]Tres\n"
+    kept = strip(text)
+    assert kept.text == "[xtrack:7]\n\n[00:01.00]Uno\n[00:02.00]Dos\n[00:03.00]Tres\n"
+    assert kept.unknown_headers == ["xtrack"]
 
 
-def test_unconfirmed_encoding_is_kept():
-    # Bytes Shift-JIS leídos como Latin-1: no se convierten a UTF-8.
-    mojibake = "東京の夜".encode("shift_jis").decode("latin-1")
-    data, encoding, _, warnings = encode_lyrics_file(mojibake + "\n", ENCODING_UTF8, "latin-1", False)
-    assert encoding == "latin-1"
-    assert data == "東京の夜\n".encode("shift_jis")
-    assert warnings
-
-
-def test_looks_like_latin_text():
-    assert looks_like_latin_text("Canción, acción, ¿qué?, ñandú, coração, œuvre")
-    assert not looks_like_latin_text("ÄãºÃÃÃ")
-    assert not looks_like_latin_text("‚ƒ")
+def test_sylt_strip_unknown_only_initial_entries():
+    entries = [("[xtrack:7]", 0), ("Uno", 1000), ("[Coro: Artista]", 1500), ("Dos", 2000), ("Tres", 3000)]
+    result = normalize_sylt(entries, strip_unknown=True)
+    assert result.entries == entries[1:]
+    assert result.removed_unknown == ["xtrack"]

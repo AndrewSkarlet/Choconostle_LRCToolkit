@@ -257,9 +257,23 @@ def _limited(items: list, limit: int) -> tuple[list, int]:
     return items[:limit], len(items) - limit
 
 
-def _more(console: Console, hidden: int) -> None:
-    if hidden:
+def _more(console: Console, hidden: int, total: int | None = None, what: str = "elementos") -> None:
+    if not hidden:
+        return
+    if total is None:
         console.print(f"  ... y {hidden} más (usa --limit 0 o --json para verlos todos)", style="dim")
+    else:
+        console.print(f"  ... y {hidden} más: se muestran {total - hidden} de {total} {what}. "
+                      "Usa --limit 0 para ver la lista completa.", style="yellow")
+
+
+def print_copyable(console: Console, text: str, style: str | None = None) -> None:
+    """
+    Imprime una línea que el usuario puede copiar (rutas, comandos) sin que
+    Rich la parta al ancho de la terminal. Si es más larga que la ventana,
+    la terminal la muestra en varias filas, pero se copia como una sola línea.
+    """
+    console.print(Text(text, style=style or ""), soft_wrap=True)
 
 
 def _section(console: Console, title: str) -> None:
@@ -382,7 +396,8 @@ def print_report(report: dict, console: Console | None = None, limit: int = 20) 
     nearly = report["lyrics_nearly_empty"]
     if nearly:
         _section(console, f"Letras casi vacías ({len(nearly)})")
-        console.print("Pocas o ninguna línea con texto. normalize-lyrics no las modifica.", style="dim")
+        console.print("Pocas o ninguna línea con texto. normalize-lyrics las procesa con un aviso "
+                      "(--skip-near-empty las omite); si quedarían vacías, no las escribe.", style="dim")
         shown, hidden = _limited(nearly, limit)
         for item in shown:
             name = item["location"] if item["source"] == SOURCE_EXTERNAL else f"{item['track']} [{item['location']}]"
@@ -482,120 +497,268 @@ def print_report(report: dict, console: Console | None = None, limit: int = 20) 
 # normalize-lyrics y revert
 # --------------------------------------------------------------------------
 
-def _change_where(change, root: Path) -> str:
-    """Ruta de la canción (o del archivo de letra si no tiene canción)."""
-    path = change.track_path or change.path
-    return _rel(path, root)
+APPLY_LIST_MAX = 50
 
 
-def print_normalize_plan(
-    changes: list,
-    root: Path,
-    mode: str,
-    encoding: str,
+def convert_option_lines(options: dict) -> list[str]:
+    """Opciones de convert-lyrics para el encabezado del reporte."""
+    from choconostle.textio import describe_rule, encoding_label, parse_target_encoding
+    target = parse_target_encoding(options["to"])
+    eol = {"lf": "LF", "crlf": "CRLF", "keep": "se conservan"}[options["eol"]]
+    from choconostle.converter import WIDE_UNICODE_WARNING, wide_unicode
+    lines = [f"Archivos .lrc/.txt: {target.label}; saltos de línea: {eol}",
+             "Codificación de origen: " + (f"{encoding_label(options['source_encoding'])} (--source-encoding, "
+                                           "para archivos de 8 bits)" if options["source_encoding"]
+                                           else "detectada (solo se convierte si es fiable)")]
+    if options.get("prefer_encoding"):
+        lines.append(f"Desempate: {encoding_label(options['prefer_encoding'])} (--prefer-encoding)")
+    rules = options.get("replacements") or []
+    if rules:
+        lines.append("Sustituciones: " + ", ".join(describe_rule(tuple(rule)) for rule in rules))
+    if options.get("id3_encoding"):
+        lines.append(f"Frames de letra ID3: {options['id3_encoding']} (--id3-encoding)")
+    if not rules and not options.get("id3_encoding"):
+        lines.append("Letras incrustadas: no se tocan (solo cambian con --replace-char o --id3-encoding)")
+    lines.append(f"Caracteres que no caben en el destino: {'omitir el archivo' if options['on_unencodable'] == 'skip' else 'detener todo'}")
+    if wide_unicode(target.codec):
+        lines.append(f"AVISO: {WIDE_UNICODE_WARNING}")
+    return lines
+
+
+def print_run_report(
+    run,
     console: Console | None = None,
-    limit: int = 20,
+    limit: int | None = None,
     show_diff: bool = False,
-    session=None,
+    applied: bool = False,
+    summary=None,
+    options: list[str] | None = None,
 ) -> None:
-    """Muestra el plan de normalize-lyrics (simulación) o el resultado (--apply)."""
-    from choconostle.backup import ITEM_FAILED, _diff
-    from choconostle.normalizer import (
-        KIND_FILE, MODE_STRIP, STATUS_CHANGE, STATUS_ERROR, STATUS_NEARLY_EMPTY,
-        STATUS_SKIPPED, STATUS_UNCHANGED,
-    )
+    """
+    Reporte de normalize-lyrics o convert-lyrics leído desde el plan y el
+    diario en disco (simulación o resultado de --apply). Cada sección
+    recorre el plan sin cargarlo entero en memoria.
+    """
+    from choconostle.normalizer import MODE_STRIP, skip_reason_label
 
     console = console or Console()
-    by_status: dict[str, list] = {}
-    for change in changes:
-        by_status.setdefault(change.status, []).append(change)
-    to_change = by_status.get(STATUS_CHANGE, [])
+    totals = run.state["totals"]
+    # Sin --limit: todo con --diff; con --apply, todo hasta APPLY_LIST_MAX entradas y
+    # si hay más, solo el resumen (la lista completa queda en registro.txt).
+    summary_only = False
+    if limit is None:
+        if show_diff:
+            limit = 0
+        elif applied:
+            summary_only = totals["entries"] > APPLY_LIST_MAX
+            limit = 20 if summary_only else 0
+        else:
+            limit = 20
+    statuses = totals["statuses"]
+    root = run.library_root()
+    _intents, done = run.outcome() if applied else ({}, {})
+    nothing = totals["entries"] == 0
+    options_state = run.state["options"]
 
-    title = "APLICADO" if session is not None else "SIMULACIÓN (no se modificó nada)"
-    console.print(f"[bold]normalize-lyrics - {title}[/bold]")
-    mode_name = "quitar cabeceras" if mode == MODE_STRIP else "estandarizar cabeceras (ar, ti, al, length)"
-    console.print(f"Modo: {mode_name}", markup=False)
-    console.print(f"Codificación de archivos .lrc/.txt: {encoding}", markup=False)
-    console.print(Text(f"Biblioteca: {root}"))
+    if applied and nothing:
+        title = "APLICADO: no había nada que aplicar"
+    elif applied:
+        title = "APLICADO" if run.phase == "completed" else "APLICADO PARCIALMENTE (se detuvo)"
+    else:
+        title = "SIMULACIÓN (no se modificó nada)"
+    command = run.state.get("command", "normalize-lyrics")
+    console.print(f"[bold]{command} - {title}[/bold]")
+    if command == "convert-lyrics":
+        for line in convert_option_lines(options_state):
+            console.print(line, markup=False)
+    else:
+        mode = options_state["mode"]
+        console.print(f"Modo: {'quitar cabeceras' if mode == MODE_STRIP else 'estandarizar cabeceras (ar, ti, al, length)'}",
+                      markup=False)
+        console.print(f"Codificación de archivos .lrc/.txt: {options_state['encoding']}", markup=False)
+    for option in options or []:
+        console.print(option, markup=False)
+    print_copyable(console, f"Biblioteca: {root}")
 
     _section(console, "Resumen")
-    files = sum(1 for change in to_change if change.kind == KIND_FILE)
-    songs = {change.track_path or change.path for change in to_change}
     table = Table(show_header=False, box=None, padding=(0, 2))
     table.add_column(style="bold")
     table.add_column()
-    table.add_row("Letras revisadas", str(len(changes)))
-    table.add_row(
-        "Modificadas" if session is not None else "A modificar",
-        f"{len(to_change)} ({plural(files, 'archivo')}, {plural(len(to_change) - files, 'incrustada')}) "
-        f"en {plural(len(songs), 'canción', 'canciones')}",
-    )
-    table.add_row("Sin cambios", str(len(by_status.get(STATUS_UNCHANGED, []))))
-    table.add_row("Casi vacías (no se tocan)", str(len(by_status.get(STATUS_NEARLY_EMPTY, []))))
-    if by_status.get(STATUS_SKIPPED):
-        table.add_row("Omitidas", str(len(by_status[STATUS_SKIPPED])))
-    if by_status.get(STATUS_ERROR):
-        table.add_row("Errores", f"[red]{len(by_status[STATUS_ERROR])}[/red]")
+    table.add_row("Letras revisadas", str(totals["lyrics"]))
+    changes = statuses.get("change", 0)
+    table.add_row("A modificar" if not applied else "Planeadas",
+                  f"{changes} ({plural(totals['files_changed'], 'archivo')}, "
+                  f"{plural(totals['embedded_changed'], 'incrustada')}) en "
+                  f"{plural(totals['songs_changed'], 'canción', 'canciones')}")
+    if applied and summary is not None:
+        applied_count = failed_count = 0
+        for event in done.values():
+            if event["status"] == "applied":
+                applied_count += 1
+            else:
+                failed_count += 1
+        table.add_row("Aplicadas (archivos)", str(applied_count))
+        if failed_count:
+            table.add_row("Con error (archivos)", f"[red]{failed_count}[/red]")
+        pending = totals["entries"] - len(done)
+        if pending > 0:
+            table.add_row("Sin aplicar (pendientes)", f"[yellow]{pending}[/yellow]")
+    table.add_row("Sin cambios", str(statuses.get("unchanged", 0)))
+    if statuses.get("decision"):
+        table.add_row("Requieren decisión (no se tocan)", f"[yellow]{statuses['decision']}[/yellow]")
+    if totals["unknown"]:
+        table.add_row("Con cabeceras desconocidas (se conservan)", str(totals["unknown"]))
+    if command != "convert-lyrics":
+        table.add_row("Casi vacías (aviso)", str(totals["nearly_empty"]))
+    rewrites = totals.get("full_rewrites") or {}
+    if rewrites:
+        detail = ", ".join(f"{ext.upper()}: {count}" for ext, count in sorted(rewrites.items()))
+        allowed = options_state.get("allow_full_rewrite")
+        table.add_row("Necesitarían reescritura completa",
+                      f"[yellow]{sum(rewrites.values())}[/yellow] ({detail})"
+                      + ("" if allowed else " - se omiten sin --allow-full-rewrite"))
+    if statuses.get("skipped"):
+        table.add_row("Omitidas", str(statuses["skipped"]))
+    if statuses.get("error"):
+        table.add_row("Errores", f"[red]{statuses['error']}[/red]")
     console.print(table)
 
-    if to_change:
-        _section(console, "Cambios" if session is not None else "Cambios que se aplicarían")
-        groups: dict[str, list] = {}
-        for change in to_change:
-            groups.setdefault(_change_where(change, root), []).append(change)
-        names = list(groups)
-        shown, hidden = _limited(names, limit)
-        for name in shown:
-            console.print(Text(name, style="bold"))
+    def lyric_items(record):
+        if record["type"] == "file":
+            yield record, record["path"]
+        else:
+            for slot in record["slots"]:
+                yield slot, f"{record['path']} [{slot['label']}]"
+
+    # Cambios, agrupados por canción.
+    if changes and summary_only:
+        _section(console, "Cambios")
+        console.print(f"{plural(totals['entries'], 'entrada')} en "
+                      f"{plural(totals['songs_changed'], 'canción', 'canciones')}: con más de {APPLY_LIST_MAX} "
+                      "solo se listan aquí las que fallaron o quedaron sin aplicar. La lista completa está en:",
+                      markup=False)
+        print_copyable(console, str(run.folder / "registro.txt"))
+        console.print("Usa --limit 0 para verla aquí.", markup=False)
+    if changes:
+        if not summary_only:
+            _section(console, "Cambios" if applied else "Cambios que se aplicarían")
+        shown_songs = total_songs = 0
+        current = None
+        for record in run.plan_records():
+            if record["status"] != "change":
+                continue
+            if summary_only and done.get(record["id"], {}).get("status") == "applied":
+                continue
+            song = record.get("track") or record["path"]
+            if song != current:
+                current = song
+                total_songs += 1
+                if limit and shown_songs >= limit:
+                    continue
+                shown_songs += 1
+                console.print(Text(song, style="bold"))
+            elif limit and shown_songs >= limit and total_songs > limit:
+                continue
+            result = done.get(record["id"])
             table = Table(show_header=False, box=None, padding=(0, 1, 0, 3))
             table.add_column()
             table.add_column()
-            for change in groups[name]:
-                table.add_row(Text(change.label), Text("; ".join(change.details)))
+            entries = [record] if record["type"] == "file" else \
+                [slot for slot in record["slots"] if slot["status"] == "change"]
+            for entry in entries:
+                table.add_row(Text(entry["label"]), Text("; ".join(entry["details"])))
+                if command == "convert-lyrics" and entry.get("source_encoding"):
+                    table.add_row(Text(""), Text(f"origen: {entry['source_encoding']}", style="dim"))
+                for warning in entry["warnings"]:
+                    table.add_row(Text(""), Text(f"aviso: {warning}", style="yellow"))
+            if applied:
+                if result is None:
+                    table.add_row(Text(""), Text("sin aplicar (la ejecución se detuvo antes)", style="yellow"))
+                elif result["status"] != "applied":
+                    table.add_row(Text(""), Text(f"FALLÓ: {result.get('error')}", style="red"))
             console.print(table)
             if show_diff:
-                for change in groups[name]:
-                    console.print(Text(f"   {change.label}:", style="bold dim"))
-                    for line in _diff(change.original_text, change.new_text)[2:]:
+                for entry in entries:
+                    heading = f"   {entry['label']}:"
+                    if entry.get("source_encoding"):
+                        heading += f" ({entry['source_encoding']})"
+                    console.print(Text(heading, style="bold dim"))
+                    if entry.get("approximate"):
+                        console.print(Text("     vista aproximada: la codificación no se pudo confirmar",
+                                           style="yellow"))
+                    for line in entry.get("diff", []):
                         style = "green" if line.startswith("+") else "red" if line.startswith("-") else "dim"
                         console.print(Text("     " + line, style=style))
-        _more(console, hidden)
+        if not summary_only:
+            _more(console, total_songs - shown_songs, total_songs, "canciones")
 
-    def listing(title: str, items: list, style: str | None = None) -> None:
-        if not items:
+    def listing(title: str, select, style: str | None = None, text=lambda item: item["message"]) -> None:
+        count = sum(1 for record in run.plan_records() for item, _where in lyric_items(record) if select(item))
+        if not count:
             return
-        _section(console, f"{title} ({len(items)})")
-        shown, hidden = _limited(items, limit)
-        for change in shown:
-            label = "" if change.kind == KIND_FILE else f" [{change.label}]"
-            where = _rel(change.path, root) + label
-            console.print(Text(f"  {where}: {change.message}", style=style or ""))
-        _more(console, hidden)
+        _section(console, f"{title} ({count})")
+        shown = 0
+        for record in run.plan_records():
+            for item, where in lyric_items(record):
+                if not select(item):
+                    continue
+                if limit and shown >= limit:
+                    break
+                shown += 1
+                console.print(Text(f"  {where}: {text(item)}", style=style or ""))
+        _more(console, count - shown, count)
 
-    listing("Letras casi vacías: se marcan y no se modifican", by_status.get(STATUS_NEARLY_EMPTY, []))
-    listing("Omitidas", by_status.get(STATUS_SKIPPED, []), "dim")
-    listing("Errores", by_status.get(STATUS_ERROR, []), "red")
+    listing("Desconocidos / requieren decisión: offsets (no se tocaron)",
+            lambda item: item["status"] == "decision", "yellow")
+    listing("Desconocidos / requieren decisión: cabeceras desconocidas que se conservan "
+            "(--strip-unknown-headers para quitarlas)", lambda item: bool(item["unknown"]),
+            text=lambda item: " ".join(f"[{name}:]" for name in item["unknown"]))
+    listing("Avisos en letras sin cambios",
+            lambda item: item["warnings"] and item["status"] == "unchanged", "dim",
+            text=lambda item: " ".join(item["warnings"]))
+    if totals["skip_reasons"]:
+        _section(console, "Archivos de audio omitidos por motivo")
+        table = Table(show_header=False, box=None, padding=(0, 2))
+        table.add_column(justify="right")
+        table.add_column()
+        for reason, count in sorted(totals["skip_reasons"].items(), key=lambda entry: (-entry[1], entry[0])):
+            table.add_row(str(count), Text(skip_reason_label(reason)))
+        console.print(table)
+    listing("Omitidas", lambda item: item["status"] == "skipped", "dim")
+    listing("Errores", lambda item: item["status"] == "error", "red")
 
     console.print()
-    if session is None:
-        if to_change:
-            console.print(
-                "Para aplicar los cambios, repite el comando con --apply. "
-                f"Antes se guardará un respaldo en {root / 'ChoconostleLRCTool_back'}.",
-                markup=False,
-            )
+    if not applied:
+        if changes:
+            console.print("Para aplicar los cambios, repite el comando con --apply. Antes se guardará "
+                          "un respaldo en:", markup=False)
+            print_copyable(console, str(root / "ChoconostleLRCTool_back"))
         else:
             console.print("No hay nada que modificar.")
         return
+    if nothing:
+        console.print("No había nada que modificar: no se creó ningún respaldo.")
+        return
+    if summary is not None and summary.stopped:
+        console.print(Text(f"SE DETUVO: {summary.stopped}", style="bold red"))
+        console.print(Text("Los archivos marcados como aplicados están confirmados en el diario; "
+                           "el resto no se modificó o se restauró."))
+        console.print("Para continuar:")
+        print_copyable(console, f'choconostle {command} "{root}" --resume "{run.folder}"')
+    console.print("Respaldo guardado en:")
+    print_copyable(console, str(run.folder))
+    console.print("Para deshacer:")
+    print_copyable(console, f'choconostle revert "{run.folder}"')
 
-    failed = [item for item in session.manifest["items"] if item["status"] == ITEM_FAILED]
-    if failed:
-        _section(console, f"No se pudieron aplicar ({len(failed)})")
-        for item in failed:
-            console.print(Text(f"  {item['path']} [{item['label']}]: {item['error']}", style="red"))
-        console.print()
-    console.print(Text(f"Respaldo guardado en: {session.folder}"))
-    console.print(Text(f'Para deshacer: choconostle revert "{session.folder}"'))
+
+def skipped_by_reason(changes: list) -> list[tuple[str, set]]:
+    """[(motivo, {archivos})] de las letras incrustadas omitidas, de mayor a menor."""
+    from choconostle.normalizer import STATUS_SKIPPED, skip_reason_label
+    groups: dict[str, set] = {}
+    for change in changes:
+        if change.status == STATUS_SKIPPED and change.skip_reason:
+            groups.setdefault(skip_reason_label(change.skip_reason), set()).add(change.path)
+    return sorted(groups.items(), key=lambda entry: (-len(entry[1]), entry[0]))
 
 
 def print_revert(results: list, folder: Path, console: Console | None = None,
@@ -605,7 +768,7 @@ def print_revert(results: list, folder: Path, console: Console | None = None,
     console = console or Console()
     title = "SIMULACIÓN (no se modificó nada)" if dry_run else "resultado"
     console.print(f"[bold]revert - {title}[/bold]")
-    console.print(Text(f"Respaldo: {folder}"))
+    print_copyable(console, f"Respaldo: {folder}")
     counts = Counter(result.status for result in results)
     table = Table(show_header=False, box=None, padding=(0, 2))
     table.add_column(style="bold")

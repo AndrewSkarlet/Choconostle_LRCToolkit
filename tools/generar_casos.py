@@ -259,7 +259,10 @@ def build(root: Path):
     song(d, "10 euc-kr coreano", synced(KO, ["[ti:테스트 곡]", "[ar:테스트 가수]", ""]), encoding="euc_kr")
     song(d, "11 windows-1251 ruso", synced(RU, ["[ti:Тестовая песня]", "[ar:Тестовый артист]", ""]), encoding="cp1251")
     song(d, "12 utf8 multiescritura", synced(MULTI, HDR_STD))
-    song(d, "13 ascii puro", synced([(t, x.encode("ascii", "ignore").decode()) for t, x in ES], HDR_STD))
+    # Todo el archivo en ASCII, incluidas las cabeceras (HDR_STD tiene "Canción").
+    song(d, "13 ascii puro", synced([(t, x.encode("ascii", "ignore").decode()) for t, x in ES],
+                                     ["[ti:Cancion de prueba]", "[ar:Artista de Prueba]",
+                                      "[by:SpotiFLAC-Mobile (source: LRCLIB)]", ""]))
     song(d, "14 japones utf8", synced(JA, ["[ti:テスト曲]", "[ar:テスト歌手]", ""]))
     song(d, "15 coreano utf8", synced(KO, ["[ti:테스트 곡]", "[ar:테스트 가수]", ""]))
     song(d, "16 ruso utf8", synced(RU, ["[ti:Тестовая песня]", ""]))

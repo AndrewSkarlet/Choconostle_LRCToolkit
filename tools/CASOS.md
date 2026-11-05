@@ -23,7 +23,7 @@ Todas con cabeceras `[ti:] [ar:] [by:]` y su .flac al lado.
 | 10 euc-kr coreano | | ⚖️ Igual que 08 |
 | 11 windows-1251 ruso | | ⚖️ Riesgo: confundirlo con 1252 y dañarlo |
 | 12 utf8 multiescritura | Español, japonés, coreano, ruso, árabe (RTL), tailandés, emoji | Quita cabeceras; texto intacto |
-| 13 ascii puro | Detectado como `ascii` | Tratarlo como UTF-8 |
+| 13 ascii puro | Todo el archivo en ASCII, cabeceras incluidas; detectado como `ascii` | Tratarlo como UTF-8 |
 | 14–16 japonés/coreano/ruso utf8 | | Quita cabeceras |
 | 17 utf8 con bytes inválidos | UTF-8 con un fragmento en 1252 | No convertir todo el archivo; avisar |
 

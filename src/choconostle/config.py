@@ -9,7 +9,7 @@ Autor: Andrew
 
 APP_NAME = "Choconostle_LRCToolkit"
 APP_CODENAME = "Xoconostle"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 APP_AUTHOR = "Andrew"
 APP_LICENSE = "MIT"
 
@@ -81,11 +81,17 @@ COVER_NAMES = [
 # carpeta padre como un solo álbum.
 DISC_FOLDER_PATTERN = r"^(cd|disc|disk|disco)[\s._-]*\d+$"
 
-# Cabeceras LRC (metadatos tipo [ar:Artista]). Poweramp en Android no
-# carga letras que las contienen. Otras etiquetas entre corchetes, como
-# "[Coro: Artista]", se consideran texto de la letra.
+# Cabeceras LRC conocidas (metadatos tipo [ar:Artista]) que
+# normalize-lyrics --strip-headers quita. Poweramp en Android no carga
+# letras que las contienen. Se reconocen sin distinguir mayúsculas, con
+# espacios antes de "[" y antes de ":" ("[ar :x]"), pero no con espacios
+# dentro del corchete ("[ ti : x ]" no es una cabecera). Pueden ir
+# precedidas de caracteres invisibles (ver textio.INVISIBLE_PREFIX_CHARS).
+# Otras etiquetas entre corchetes, como "[Coro: Artista]", se consideran
+# texto de la letra; las desconocidas al inicio (como "[xtrack:7]") se
+# conservan salvo con --strip-unknown-headers.
 LRC_HEADER_TAGS = [
-    "ar", "ti", "al", "au", "by", "length", "offset", "re", "ve",
+    "ar", "ti", "al", "au", "lr", "by", "length", "offset", "re", "ve",
     "tool", "la", "lang", "language", "id", "key", "hash", "sign",
     "total", "encoding", "kana", "#",
 ]
@@ -94,7 +100,8 @@ LRC_HEADER_TAGS = [
 MAX_LYRICS_FILE_SIZE = 2 * 1024 * 1024
 
 # Letras con este número de líneas con texto o menos se consideran "casi
-# vacías": se marcan en el reporte y normalize-lyrics no las modifica.
+# vacías": se marcan en el reporte y normalize-lyrics las procesa con un
+# aviso (o las omite con --skip-near-empty).
 NEARLY_EMPTY_MAX_LINES = 2
 
 # Cabeceras que escribe normalize-lyrics --standardize-headers, en orden.

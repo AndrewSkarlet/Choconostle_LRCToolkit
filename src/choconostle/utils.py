@@ -62,6 +62,39 @@ def percent(part: int, total: int) -> str:
     return f"{part * 100 / total:.1f}%"
 
 
+# Windows limita las rutas a 260 caracteres salvo con el prefijo \\?\ (o con
+# LongPathsEnabled en el registro y Python 3.6+). Se añade el prefijo a partir
+# de este largo para dejar margen a los nombres temporales.
+_LONG_PATH = 240
+
+
+def long_path(path, windows: bool | None = None) -> str:
+    r"""
+    Ruta utilizable por las funciones de archivos aunque sea larga.
+
+    En Windows, una ruta absoluta de 240 caracteres o más recibe el prefijo
+    \\?\ (o \\?\UNC\ para rutas de red). En Linux, macOS y Android se
+    devuelve tal cual.
+    """
+    windows = os.name == "nt" if windows is None else windows
+    text = os.fspath(path)
+    if not windows or text.startswith("\\\\?\\"):
+        return text
+    if windows and os.name == "nt":
+        text = os.path.abspath(text)
+    if len(text) < _LONG_PATH:
+        return text
+    text = text.replace("/", "\\")
+    if text.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + text[2:]
+    return "\\\\?\\" + text
+
+
+def fsync_file(handle) -> None:
+    handle.flush()
+    os.fsync(handle.fileno())
+
+
 def write_file_atomic(path: Path, data: bytes) -> None:
     """
     Escribe un archivo de forma segura: primero en uno temporal junto al
@@ -69,11 +102,10 @@ def write_file_atomic(path: Path, data: bytes) -> None:
     """
     temporary = path.with_name(path.name + ".choconostle-tmp")
     try:
-        with open(temporary, "wb") as handle:
+        with open(long_path(temporary), "wb") as handle:
             handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
+            fsync_file(handle)
+        os.replace(long_path(temporary), long_path(path))
     finally:
-        if temporary.exists():
-            temporary.unlink()
+        if os.path.exists(long_path(temporary)):
+            os.unlink(long_path(temporary))
