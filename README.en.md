@@ -113,17 +113,15 @@ Other commands: `recover` (leaves each interrupted write as the original or as a
 - NAS and ARM; charset-normalizer in pure Python outside Linux x86.
 - A real full disk (only simulated).
 - The ID3 editor with real MP3 files that have headers (only generated MP3 files).
-- Performance measurements on Windows and on an SD card. `revert` speed after the rc1 change has not been re-measured on an SD card.
+- `tools/medir_rendimiento.py` (memory and time measurements) on Windows and on an SD card.
 - How music apps other than the one tested react to `.nomedia`.
-- The rc1 progress-line fix in Windows consoles.
-- `[Errno 22] Invalid argument` with invalid FAT file names.
 
 **Known and unresolved:**
 - `[Errno 22] Invalid argument` appears when a real SD card is removed. It is reported as a possible disconnection ("La unidad dejó de responder ... ¿se desconectó la tarjeta SD?", exit code 3). Its behavior with invalid FAT file names, which can also cause it, has not been tested.
 - `tests/test_memoria.py` is slow on Windows (45–57 s). Once it failed inside a full run on Linux while passing on its own; the cause is unknown.
 - Memory grows by about 420 bytes per file in `revert` and about 1.3 KB per file in `scan`.
 
-**Not in 1.0.0rc1:** a library organizer (renaming and sorting files), a full English README and translated messages, and better performance on slow cards (every write is synced to disk).
+**Not in 1.0.0rc1:** a library organizer (renaming and sorting files), a full English README and translated messages, and better performance on slow cards. Every write is synced to disk: on a 4 GB SD card (FAT32, USB 2.0) a synced write costs about 19 ms per file, against about 1 ms on the internal disk. With 42 files on that card, `revert` took 21–22 s and `--apply` 25 s.
 
 ## Reporting a bug
 

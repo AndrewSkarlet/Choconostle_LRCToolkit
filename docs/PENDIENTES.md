@@ -13,10 +13,7 @@ Lo que no se hizo o no se probó en la versión 1.0.0rc1. Las decisiones ya toma
 - **Disco lleno real:** solo está simulado.
 - **Editor ID3:** solo se probó con MP3 generados, no con MP3 reales con cabeceras.
 - **Mediciones de rendimiento** (`tools/medir_rendimiento.py`): solo en Linux sobre disco local, no en Windows ni en una SD.
-- **`revert`:** tras el cambio de la v1.0.0-rc1 usa la misma verificación que `--apply`, pero no se ha vuelto a medir en una SD (antes tardaba 14,5 s frente a 5,2 s de `--apply` con 28 archivos).
 - **`fix-gallery`:** se probó en un teléfono Android real (Termux) con una app de música, que siguió viendo las canciones. No se ha comprobado con otras apps de música, que pueden reaccionar distinto a los `.nomedia` (MediaStore).
-- **Pantalla de la consola:** no se ha comprobado en consolas de Windows que la línea de progreso ya no deja restos del nombre anterior; en Linux no se reproducía.
-- **`[Errno 22] Invalid argument`:** no se probó con nombres de archivo no válidos en FAT.
 
 ## Conocido y sin resolver
 
@@ -30,5 +27,5 @@ Lo que no se hizo o no se probó en la versión 1.0.0rc1. Las decisiones ya toma
 
 - **Acomodador de biblioteca:** renombrar y ordenar carpetas y archivos. `src/choconostle/rename.py` está vacío.
 - **README completo en inglés y mensajes del programa traducidos** (solo hay un README corto, `README.en.md`).
-- **Rendimiento en tarjetas lentas:** cada escritura sincroniza el respaldo, el diario y el archivo (fsync), y en tarjetas SD lentas ese coste domina el tiempo total. Reducirlo exige agrupar sincronizaciones sin perder la capacidad de reanudar.
+- **Rendimiento en tarjetas lentas:** cada escritura sincroniza el respaldo, el diario y el archivo (fsync), y en tarjetas SD lentas ese coste domina el tiempo total. En una SD de 4 GB (FAT32, USB 2.0), una escritura con sincronización cuesta unos 19 ms por archivo, frente a 1 ms en el disco interno; con 42 archivos, `revert` tardó 21-22 s y `--apply` 25 s. Reducirlo exige agrupar sincronizaciones sin perder la capacidad de reanudar.
 - **Idea anotada:** detectar letras que en realidad son publicidad o créditos de la web de origen, por ejemplo una URL que se repite en muchos archivos.
