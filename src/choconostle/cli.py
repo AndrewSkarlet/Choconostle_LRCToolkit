@@ -50,6 +50,7 @@ from choconostle.report import (
 from choconostle.scanner import LibraryScan, count_files, scan_directory
 from choconostle.textio import EncodingOptionError, parse_target_encoding
 from choconostle.utils import format_size, long_path
+from rich.table import Column
 from rich.text import Text
 
 app = typer.Typer(
@@ -482,11 +483,16 @@ class _RunProgress:
         self.stop()
         if not self.enabled:
             return
+        # expand=True: cada actualización ocupa el ancho completo de la terminal
+        # (rellena con espacios) y el texto variable se recorta con «…». Así no
+        # quedan restos de un nombre anterior más largo en las consolas que no
+        # borran la línea antes de redibujarla.
         self.progress = Progress(
-            SpinnerColumn(), TextColumn("{task.description}"), BarColumn(), MofNCompleteColumn(),
-            TextColumn("{task.fields[stats]}"), TimeElapsedColumn(),
-            TextColumn("restante (estimado)"), TimeRemainingColumn(),
-            console=self.console, transient=True,
+            SpinnerColumn(), TextColumn("{task.description}"),
+            BarColumn(bar_width=None, table_column=Column(ratio=1)), MofNCompleteColumn(),
+            TextColumn("{task.fields[stats]}", table_column=Column(ratio=2, no_wrap=True, overflow="ellipsis")),
+            TimeElapsedColumn(), TextColumn("restante (estimado)"), TimeRemainingColumn(),
+            console=self.console, transient=True, expand=True,
         )
         self.progress.start()
         self.task = self.progress.add_task(description, total=total, completed=completed, stats="")
@@ -501,7 +507,9 @@ class _RunProgress:
 
     def tick(self, count: int = 1, current: str = "") -> None:
         if self.progress is not None:
-            self.progress.update(self.task, advance=count, stats=current)
+            # Solo el nombre del archivo: si no cabe, se recorta por el final con «…».
+            name = current.replace("\\", "/").rsplit("/", 1)[-1] if current else ""
+            self.progress.update(self.task, advance=count, stats=name)
 
     def step(self, text: str) -> None:
         """Paso en curso dentro del archivo actual (p. ej. una verificación larga)."""

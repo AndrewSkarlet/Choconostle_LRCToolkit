@@ -503,3 +503,23 @@ def test_stop_summary_matches_diary(biblioteca, monkeypatch, paths, error):
     assert shown("Aplicadas") == applied, result.output
     assert shown("Con error") == failed, result.output
     assert shown("Sin aplicar") == pending, result.output
+
+
+def test_revert_shows_recovery_line_only_when_pending(biblioteca, monkeypatch):
+    """«Recuperando escrituras pendientes» solo aparece si hay algo pendiente."""
+    args = ["normalize-lyrics", str(biblioteca), "--strip-headers", "--apply", "--no-progress",
+            *sum((["--only", o] for o in ONLY), [])]
+    assert runner.invoke(app, args).exit_code == 0
+    folder = next((biblioteca / BACKUP_DIR_NAME).iterdir())
+    started = []
+
+    class Recorder:
+        def start(self, description, total, completed=0):
+            started.append(description)
+
+        def tick(self, *args):
+            pass
+
+    backup.revert(folder, progress=Recorder())
+    assert "Recuperando escrituras pendientes" not in started
+    assert "Revirtiendo" in started

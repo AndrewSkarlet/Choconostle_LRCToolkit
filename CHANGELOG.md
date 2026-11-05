@@ -18,6 +18,10 @@ Versión candidata (`1.0.0rc1` en `pyproject.toml` y `config.py`).
   - si la unidad no se puede leer, el resumen («Aplicadas», «Con error», «Sin aplicar») sale de la copia en memoria de los eventos `done` que se confirmaron en el diario, incluidos los de ejecuciones anteriores con `--resume`.
   - Prueba nueva (`test_stop_summary_matches_diary`, en los modos «posix» y «windows», con ENOENT, WinError 21 y EIO) que compara el resumen con los eventos `done` del diario.
 
+### Corregido (ajuste cosmético)
+- La línea de progreso dejaba restos del nombre anterior (p. ej. «0:00:00Before).lrc») cuando el nuevo era más corto. No se reproduce en Linux, donde rich borra la línea antes de redibujarla; ocurre en consolas que no lo hacen. Ahora cada actualización ocupa el ancho completo de la terminal (rellena con espacios), no se parte en dos filas y muestra solo el nombre del archivo, recortado con «…» si no cabe.
+- `revert` ya no muestra «Recuperando escrituras pendientes» si no hay nada pendiente.
+
 ### No probado
 - `[Errno 22] Invalid argument`, que apareció al desconectar una SD real, sigue sin tratarse como desconexión. No se probó con nombres de archivo no válidos en FAT, que también pueden darlo.
 

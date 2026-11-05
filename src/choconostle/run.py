@@ -1210,7 +1210,8 @@ def revert_run(folder: Path, force: bool = False, dry_run: bool = False, progres
                 raise backup.RevertNoSpace(
                     f"Espacio libre insuficiente para revertir: se necesitan {format_size(needed)} y hay "
                     f"{format_size(free)}. No se modificó nada.")
-            _progress_call(progress, "start", "Recuperando escrituras pendientes", None)
+            if Journal(run.folder).pending():  # la línea solo aparece si hay algo que recuperar
+                _progress_call(progress, "start", "Recuperando escrituras pendientes", None)
             recover(run.folder, root)
         intents, done = run.outcome()
         _progress_call(progress, "start", "Comprobando" if dry_run else "Revirtiendo",

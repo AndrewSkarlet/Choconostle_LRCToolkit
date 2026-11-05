@@ -112,7 +112,7 @@ Equipo del usuario: Windows, Python 3.15.1 y charset-normalizer 3.5.2 (rueda com
 - **Versión:** 0.3.0, aprobada por el usuario y aplicada en `pyproject.toml` y `config.py`.
 - **Verificado por el usuario después de `0ad99a7`:**
   - Windows: suite 454/454 sobre `0ad99a7` (20 min 48 s); ciclo con 67 FLAC reales (98 archivos, 0 diferencias); `clean-backups` manual; rutas de 580 caracteres con `revert --latest`; SD exFAT por USB 2.0 (265 archivos, 0 diferencias); desconexión real de una SD FAT32 a mitad de `--apply --verify full` (código 3, `--resume` y `revert` correctos, 134 archivos con 0 diferencias, sin verificar audio y etiquetas tras el `--resume`).
-  - Android: Termux en un Moto Edge 60 Fusion, memoria interna, 159 FLAC (298 archivos idénticos por SHA-256 tras `revert`).
+  - Android: un teléfono Android (Termux), memoria interna, 159 FLAC (298 archivos idénticos por SHA-256 tras `revert`).
   - El detalle está en la descripción del PR.
 - **Mejoras pendientes y lo no probado:** ver «v0.3.0» en `CHANGELOG.md`. No están implementadas.
 
