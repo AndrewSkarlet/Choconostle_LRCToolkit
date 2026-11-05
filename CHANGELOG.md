@@ -43,7 +43,7 @@ Versión candidata (`1.0.0rc1` en `pyproject.toml` y `config.py`).
 
 ## v0.3.0 - Fase 2.1: normalización segura, conversión de letras y escalabilidad
 
-Sube la versión menor por las incompatibilidades con la v0.2.0 (ver cada etapa). Los resultados de las pruebas en Windows y Android están en la descripción del PR y en `docs/TRASPASO_FASE_2_1.md`.
+Sube la versión menor por las incompatibilidades con la v0.2.0 (ver cada etapa). Los resultados de las pruebas en Windows y Android están en la descripción del PR. Lo que quedó sin hacer o sin probar está en `docs/PENDIENTES.md`.
 
 ### Mejoras pendientes (sin implementar)
 - `revert` no muestra progreso y es más lento que `--apply` (14,5 s frente a 5,2 s con 28 archivos en una SD).
