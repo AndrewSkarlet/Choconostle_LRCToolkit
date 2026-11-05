@@ -1,5 +1,7 @@
 # Choconostle_LRCToolkit
 
+English version: [README.en.md](README.en.md)
+
 Toolkit para analizar, reparar y organizar bibliotecas musicales con archivos LRC.
 
 Versión actual: **1.0.0rc1 (Xoconostle)**, versión candidata.
