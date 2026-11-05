@@ -14,7 +14,7 @@ This is a short version. The full documentation is in the [Spanish README](READM
 
 ## Installation
 
-Requires Python 3.9 or later. All dependencies are pure Python. Some automated tests also need `ffmpeg`.
+Requires Python 3.9 or later (tested on 3.14 and 3.15). All dependencies are pure Python. Some automated tests also need `ffmpeg`.
 
 ### Linux / Windows
 
@@ -77,7 +77,7 @@ choconostle fix-gallery /sdcard/Music --only "Artist/Album" --apply
 
 Creates an empty `.nomedia` file in album folders. `--remove --apply` removes only the files it created.
 
-> **⚠️ Warning:** apps that read Android's media index (MediaStore) also stop listing the **songs** in folders with `.nomedia`. Try it on one album with your music app before applying it to the whole library. This has not been tested on a real Android device yet.
+> **⚠️ Warning:** apps that read Android's media index (MediaStore) also stop listing the **songs** in folders with `.nomedia`. It was tested on a real Android phone (Termux) with one music app: the covers disappeared from the gallery and the music app still listed the songs. Other music apps may react differently, so try it on one album with your music app before applying it to the whole library.
 
 Details: [Ocultar portadas en la galería](README.md#ocultar-portadas-en-la-galería-fix-gallery).
 
@@ -103,8 +103,10 @@ Other commands: `recover` (leaves each interrupted write as the original or as a
 ## Tested / Not tested
 
 **Tested:**
-- The automated test suite: on Linux for 1.0.0rc1, and on Windows for version 0.3.0 (the rc1 run on Windows is pending). Disconnection, interruption and disk-full scenarios are **simulated**, in both Linux-like and Windows-like path behavior (see [Pruebas](README.md#pruebas) and `tests/COBERTURA.md`).
-- With version 0.3.0, the author ran apply and `revert` cycles on real FLAC files on Windows (internal disk and SD cards via USB, including removing the card in the middle of a run) and on Android with Termux (internal storage). Files were byte-identical after `revert`. The rc1 changes have not been re-run on those setups yet.
+- The automated test suite on Linux and Windows. On Windows: full suite, 496 of 496 passed on commit `06a7317`; 264 tests of `test_cli`, `test_robustez` and `test_run` passed on `e4b0de8`. Disconnection, interruption and disk-full scenarios are **simulated**, in both Linux-like and Windows-like path behavior (see [Pruebas](README.md#pruebas) and `tests/COBERTURA.md`).
+- With version 0.3.0, the author ran apply and `revert` cycles on real FLAC files on Windows (internal disk and SD cards via USB, including removing the card in the middle of a run) and on Android with Termux (internal storage). Files were byte-identical after `revert`.
+- With the rc1 version, on Windows: an apply/`revert` cycle with a real removal of a 4 GB SD card (FAT32, USB 2.0 adapter) in the middle of the run, followed by `--resume`. A byte-by-byte comparison of 129 files (audio and tags included) found 0 differences.
+- `fix-gallery` on a real Android phone (Termux) with one music app (see the warning above).
 
 **Not tested** (from [docs/PENDIENTES.md](docs/PENDIENTES.md)):
 - SD card from the phone, large libraries on the phone, `convert-lyrics` in Termux, CPU and battery use.
@@ -112,13 +114,12 @@ Other commands: `recover` (leaves each interrupted write as the original or as a
 - A real full disk (only simulated).
 - The ID3 editor with real MP3 files that have headers (only generated MP3 files).
 - Performance measurements on Windows and on an SD card. `revert` speed after the rc1 change has not been re-measured on an SD card.
-- `fix-gallery` on a real Android device, and how each music app reacts to `.nomedia`.
+- How music apps other than the one tested react to `.nomedia`.
 - The rc1 progress-line fix in Windows consoles.
 - `[Errno 22] Invalid argument` with invalid FAT file names.
-- Audio and tags after `--resume` following a real disconnection.
 
 **Known and unresolved:**
-- `[Errno 22] Invalid argument`, seen when a real SD card was removed, is not treated as a disconnection: only that file fails (exit code 1).
+- `[Errno 22] Invalid argument` appears when a real SD card is removed. It is reported as a possible disconnection ("La unidad dejó de responder ... ¿se desconectó la tarjeta SD?", exit code 3). Its behavior with invalid FAT file names, which can also cause it, has not been tested.
 - `tests/test_memoria.py` is slow on Windows (45–57 s). Once it failed inside a full run on Linux while passing on its own; the cause is unknown.
 - Memory grows by about 420 bytes per file in `revert` and about 1.3 KB per file in `scan`.
 
