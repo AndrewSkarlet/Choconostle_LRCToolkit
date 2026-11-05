@@ -7,7 +7,7 @@ Responsabilidades:
 - Agrupar por carpeta (las subcarpetas CD1/CD2 cuentan como un álbum).
 - Agrupar por etiqueta (artista del álbum + álbum).
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 

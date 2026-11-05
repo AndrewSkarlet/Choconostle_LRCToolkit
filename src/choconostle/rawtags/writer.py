@@ -22,7 +22,7 @@ recover() usa el diario para dejar el archivo como estaba.
 La reescritura completa (cuando el audio tiene que desplazarse) se hace
 en un archivo temporal junto al original y se reemplaza de forma atómica.
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 

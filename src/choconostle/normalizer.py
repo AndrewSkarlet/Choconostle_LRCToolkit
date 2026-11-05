@@ -20,7 +20,7 @@ caracteres invisibles), salvo las marcas de tiempo al aplicar un offset.
 Si algo no se puede hacer con seguridad (varios offsets, offset
 inválido), el archivo no se toca y se lista para revisión.
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 

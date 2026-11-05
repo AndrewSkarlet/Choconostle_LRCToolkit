@@ -19,7 +19,7 @@ Formatos que se pueden escribir:
 
 Matroska (.mka) solo se puede leer.
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 

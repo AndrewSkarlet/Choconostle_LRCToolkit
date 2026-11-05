@@ -8,7 +8,7 @@ Responsabilidad:
 - Almacenar las pistas de un álbum y datos derivados simples.
 - No contiene lógica de agrupación (ver albums.py).
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 

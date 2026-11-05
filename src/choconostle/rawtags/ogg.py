@@ -14,7 +14,7 @@ Verificación: el contenido de las páginas de audio (sin número de página
 ni CRC), el vendor y los comentarios que no son letras deben quedar
 iguales.
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 

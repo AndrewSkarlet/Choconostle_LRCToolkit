@@ -8,7 +8,7 @@ mutagen no soporta Matroska, así que se recorre la estructura EBML
 directamente. Solo se leen los elementos necesarios; los bloques de
 audio (Clusters) se saltan sin leerlos.
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 

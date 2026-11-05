@@ -24,7 +24,7 @@ Reglas de seguridad:
 Usa el mismo sistema de ejecución que normalize-lyrics (run.py): plan en
 disco, diario, respaldo, --resume y revert.
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 

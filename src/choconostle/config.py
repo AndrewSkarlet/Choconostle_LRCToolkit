@@ -4,13 +4,13 @@ config.py
 Configuración general del proyecto Choconostle_LRCToolkit.
 Este archivo almacena información global utilizada por toda la aplicación.
 
-Autor: Andrew
+Autor: AndrewSkarlet
 """
 
 APP_NAME = "Choconostle_LRCToolkit"
 APP_CODENAME = "Xoconostle"
 APP_VERSION = "0.3.0"
-APP_AUTHOR = "Andrew"
+APP_AUTHOR = "AndrewSkarlet"
 APP_LICENSE = "MIT"
 
 

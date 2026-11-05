@@ -23,6 +23,8 @@ Versión actual: **0.3.0 (Xoconostle)**.
 - **Formatos sin letras incrustadas** (WAV, AIFF, AAC/AC-3 sin contenedor): se indican como información, no como error. En esos casos usa un `.lrc` externo.
 - Archivos `.lrc` sin canción, audio no compatible (WMA, DSD...) y archivos que no se pudieron leer.
 
+> **⚠️ Antes de usar `--apply`, haz una copia de tu biblioteca.** Ejecuta siempre primero la simulación (el mismo comando sin `--apply`) y revisa qué cambiaría. La herramienta guarda respaldos de lo que modifica, pero una copia propia es la única protección ante cualquier imprevisto.
+
 ## Instalación
 
 Requiere Python 3.9 o superior.
@@ -74,6 +76,13 @@ python -m choconostle scan ~/Música      # sin instalar el comando
 | `--no-progress` | No muestra el indicador de progreso. |
 
 `choconostle version` muestra la versión.
+
+### Bienvenida
+
+`choconostle` sin argumentos, o `choconostle welcome`, muestra un banner corto con el nombre, la versión, la descripción, los comandos principales y un consejo («empieza con scan; nada se modifica sin --apply»). Es solo ASCII y mide como máximo 40 columnas, para Termux y las consolas de Windows con otra codificación.
+
+- No aparece con los demás comandos, ni cuando la salida no es una terminal interactiva (por ejemplo, redirigida a un archivo): en esos casos se muestra la ayuda.
+- `--no-banner` (`choconostle --no-banner`) o la variable de entorno `CHOCONOSTLE_NO_BANNER` (con cualquier valor) lo apagan.
 
 ## Normalizar letras (Fase 2)
 
@@ -392,6 +401,41 @@ Si no, se omite y se lista con los candidatos. En `--diff` y en la lista de camb
 - `utf8` solo es válido en ID3v2.4: en un tag v2.3 el frame se omite, y la versión del tag nunca se cambia.
 - Pasar de Latin-1 a UTF-16 suele duplicar el tamaño y no caber en el relleno. Esos archivos necesitan reescritura completa: la simulación los cuenta por formato («Necesitarían reescritura completa: 7 (MP3: 7)») y se omiten salvo con `--allow-full-rewrite`.
 
+## Ocultar portadas en la galería (fix-gallery)
+
+Las apps de galería de Android muestran las portadas (`cover.jpg`, `folder.png`...) como si fueran fotos. `fix-gallery` crea un archivo vacío `.nomedia` en las carpetas de álbum para ocultarlas. No abre ni modifica audio, letras ni etiquetas.
+
+> **⚠️ Advertencia (MediaStore).** Android no indexa **nada** de una carpeta con `.nomedia`: las apps que leen el índice de medios del sistema (MediaStore) dejan de listar también **las canciones** de esa carpeta. Las que recorren las carpetas por su cuenta siguen viéndolas. **Prueba primero con tu app de música** en un solo álbum (`--only`) antes de aplicarlo a toda la biblioteca. Para deshacerlo: `fix-gallery RUTA --remove --apply`.
+
+```bash
+# 1. Simulación (por defecto): qué carpetas recibirían .nomedia
+choconostle fix-gallery /sdcard/Music
+
+# 2. Prueba con un solo álbum y revisa tu app de música
+choconostle fix-gallery /sdcard/Music --only "Artista/Álbum" --apply
+
+# 3. Toda la biblioteca
+choconostle fix-gallery /sdcard/Music --apply
+
+# Deshacer: quita solo los .nomedia que creó fix-gallery
+choconostle fix-gallery /sdcard/Music --remove --apply
+```
+
+| Opción | Descripción |
+|---|---|
+| `--apply` | Crea los `.nomedia` (o, con `--remove`, los quita). Sin ella solo se simula. |
+| `--all-folders` | Pone `.nomedia` en todas las carpetas con audio, tengan o no imágenes. Por defecto, solo en las carpetas con imágenes (jpg, jpeg, png, webp, bmp, gif, sin distinguir mayúsculas). |
+| `--include-root` | Incluye la carpeta raíz indicada y las carpetas `Music`, `Pictures`, `DCIM` y `Download`. |
+| `--remove` | Quita solo los `.nomedia` que creó esta herramienta. Nunca borra uno que ya existía ni uno al que se le escribió contenido. |
+| `--only CARPETA_O_ÁLBUM` | Igual que en `normalize-lyrics`. Se puede repetir. |
+| `--limit N`, `--include-hidden`, `--no-progress` | Igual que en `scan`. |
+
+- **Carpetas que se omiten.** Una carpeta que ya tiene `.nomedia` no se toca y cuenta como «ya existente», así que repetir el comando no cambia nada.
+- **Carpeta raíz.** La carpeta que indicas no recibe `.nomedia` si es una raíz, es decir, si tiene subcarpetas con audio. Si tiene audio directamente y ninguna subcarpeta con audio, es un álbum y se trata como cualquier otro. Las carpetas `Music`, `Pictures`, `DCIM` y `Download` (en cualquier nivel) nunca se tocan. Las dos protecciones se quitan con `--include-root`, y el reporte indica cuándo la raíz queda fuera.
+- **Lista de lo creado.** Se guarda en `ChoconostleLRCTool_back/fix-gallery_creados.json`, que `clean-backups` nunca borra. Se escribe por tandas de 50 carpetas y cada tanda se anota antes de crear sus archivos, así que, si la unidad se desconecta, la ejecución siguiente confirma lo que sí se creó.
+- **Desconexión.** Si la unidad desaparece, el comando se detiene con código 3 y muestra cómo repetirlo. Un error en una sola carpeta (por ejemplo, acceso denegado) se lista y da código 1.
+- **Resumen.** Carpetas revisadas, creadas, ya existentes, omitidas (sin imágenes y protegidas) y con error. Mientras trabaja muestra una barra con «N de M».
+
 ## Estructura
 
 ```
@@ -410,6 +454,7 @@ src/choconostle/
 ├── textio.py       Líneas sin pérdida, detección y conversión de codificación, diff
 ├── run.py          Ejecución en dos pasadas: plan en disco, diario, --resume, clean-backups
 ├── backup.py       Revert (todas las versiones de respaldo) y recover
+├── gallery.py      fix-gallery: .nomedia en las carpetas de álbum y lista de lo creado
 ├── lrc.py          Análisis de letras: marcas de tiempo, cabeceras, BOM, codificación
 ├── albums.py       Agrupa pistas en álbumes
 ├── report.py       Reporte en terminal y JSON
@@ -437,4 +482,4 @@ Las pruebas de FLAC, MP3, WAV y APE generan los archivos en Python puro. Las de 
 
 ## Licencia
 
-MIT. Ver [LICENSE](LICENSE).
+MIT. Ver [LICENSE](LICENSE). Autor: AndrewSkarlet.

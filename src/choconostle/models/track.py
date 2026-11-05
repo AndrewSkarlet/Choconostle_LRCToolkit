@@ -7,7 +7,7 @@ Responsabilidad:
 - Almacenar información de una canción.
 - No contiene lógica de análisis.
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 

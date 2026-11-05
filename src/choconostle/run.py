@@ -27,7 +27,7 @@ Pasos de cada entrada (una interrupción en cualquiera se resuelve con
     1. copia de respaldo (fsync)   2. evento "intent" (fsync)
     3. escritura                    4. verificación     5. evento "done" (fsync)
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 
@@ -210,8 +210,12 @@ def _safe_name(name: str, limit: int = 80) -> str:
     return name[:limit]
 
 
-def fatal_kind(exc: BaseException, root: Path) -> str | None:
-    """"space", "device" o None según el error (y si la biblioteca sigue accesible)."""
+def fatal_kind(exc: BaseException, root: Path, backups: bool = True) -> str | None:
+    """
+    "space", "device" o None según el error (y si la biblioteca sigue
+    accesible). Con backups=False no se exige que exista la carpeta de
+    respaldos (fix-gallery en simulación no la crea).
+    """
     seen = set()
     current = exc
     while current is not None and id(current) not in seen:
@@ -223,7 +227,7 @@ def fatal_kind(exc: BaseException, root: Path) -> str | None:
             if winerror in DEVICE_WINERRORS or (winerror is None and current.errno in _DEVICE_ERRNOS):
                 return "device"
         current = current.__cause__ or current.__context__
-    if not reachable(root):
+    if not reachable(root, backups=backups):
         return "device"
     return None
 

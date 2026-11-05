@@ -16,7 +16,7 @@ Responsabilidades:
 - Avisar de posible mojibake (sin corregirlo).
 - Mostrar diferencias con los caracteres invisibles visibles.
 
-Autor: Andrew
+Autor: AndrewSkarlet
 Licencia: MIT
 """
 
