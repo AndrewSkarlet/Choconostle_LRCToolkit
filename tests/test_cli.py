@@ -108,7 +108,10 @@ def _banner_check(output: str) -> None:
     assert all(line.isascii() and len(line) <= 40 for line in lines)
     text = " ".join(line.strip("|+- ") for line in lines)
     assert APP_NAME in text and APP_VERSION in text and f"({APP_CODENAME})" in text
-    assert "scan" in text and "fix-gallery" in text and "--apply" in text
+    for name in ["scan", "normalize-lyrics", "convert-lyrics", "revert", "recover", "clean-backups",
+                 "fix-gallery", "welcome", "version"]:
+        assert f"| {name}" in output.replace("|   ", "| "), name
+    assert "--apply" in text
 
 
 @pytest.fixture
@@ -155,3 +158,72 @@ def test_banner_not_shown_when_redirected():
 
 def test_banner_lines_ascii_and_narrow():
     assert all(line.isascii() and len(line) <= 40 for line in cli.banner_lines())
+
+
+def test_banner_lists_every_command_in_help():
+    """El banner lista todos los comandos que muestra la ayuda."""
+    import typer.main
+    names = set(typer.main.get_command(app).commands)
+    assert names == set(cli.BANNER_COMMANDS)
+
+
+# --- Línea de progreso sin restos ---------------------------------------------
+
+@pytest.mark.parametrize("width", [60, 80, 120])
+def test_progress_line_never_leaves_leftovers(width):
+    """
+    Cada actualización ocupa el ancho completo (rellena con espacios) y no se
+    parte en dos filas, así que un nombre corto tapa del todo al anterior aunque
+    la consola no borre la línea (algunas consolas de Windows).
+    """
+    import io
+    import re
+
+    from rich.console import Console
+
+    buffer = io.StringIO()
+    console = Console(file=buffer, force_terminal=True, width=width, color_system=None)
+    progress = cli._RunProgress(console, enabled=True)
+    progress.start("Revirtiendo", 30)
+    long_name = "03_cabeceras/" + "nombre muy largo " * 8 + "Before After).lrc"
+    progress.tick(0, long_name)
+    progress.progress.refresh()
+    progress.tick(1, "x.lrc")
+    progress.progress.refresh()
+    progress.stop()
+    frames = [re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", frame).rstrip("\r\n")
+              for frame in re.split(r"\r\x1b\[2K", buffer.getvalue())[1:]]
+    frames = [frame for frame in frames if frame]
+    assert len(frames) >= 2
+    for frame in frames:
+        assert "\n" not in frame and len(frame) == width, repr(frame)
+    last = frames[-1]
+    assert "Before" not in last and "muy largo" not in last
+    assert ("x.lrc" if width >= 80 else "x") in last
+
+
+def test_progress_shows_only_file_name():
+    import io
+
+    from rich.console import Console
+
+    console = Console(file=io.StringIO(), force_terminal=True, width=200, color_system=None)
+    progress = cli._RunProgress(console, enabled=True)
+    progress.start("Revirtiendo", 1)
+    progress.tick(0, "Artista\\Álbum/01 canción.lrc")
+    assert progress.progress.tasks[0].fields["stats"] == "01 canción.lrc"
+    progress.stop()
+
+
+def test_progress_disabled_does_nothing():
+    import io
+
+    from rich.console import Console
+
+    buffer = io.StringIO()
+    progress = cli._RunProgress(Console(file=buffer, force_terminal=True), enabled=False)
+    progress.start("Revirtiendo", 3)
+    progress.tick(1, "a.lrc")
+    progress.step("verificando")
+    progress.stop()
+    assert buffer.getvalue() == ""

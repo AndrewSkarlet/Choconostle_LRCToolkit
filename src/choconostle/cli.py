@@ -50,6 +50,7 @@ from choconostle.report import (
 from choconostle.scanner import LibraryScan, count_files, scan_directory
 from choconostle.textio import EncodingOptionError, parse_target_encoding
 from choconostle.utils import format_size, long_path
+from rich.table import Column
 from rich.text import Text
 
 app = typer.Typer(
@@ -59,7 +60,8 @@ app = typer.Typer(
 
 BANNER_WIDTH = 40
 BANNER_ENV = "CHOCONOSTLE_NO_BANNER"
-BANNER_COMMANDS = ["scan", "normalize-lyrics", "convert-lyrics", "fix-gallery", "revert", "clean-backups"]
+BANNER_COMMANDS = ["scan", "normalize-lyrics", "convert-lyrics", "revert", "recover", "clean-backups",
+                   "fix-gallery", "welcome", "version"]
 
 
 def banner_lines() -> list[str]:
@@ -399,8 +401,20 @@ def _report(execution, console, error_console, path, limit, diff, applied, summa
         if summary is None or not summary.stopped:
             raise
         print_copyable(error_console, f"SE DETUVO: {summary.stopped}", "red")
-        error_console.print(f"Confirmadas antes de detenerse: {summary.applied} aplicadas, {summary.failed} con error. "
-                            "El resto no se modificó o se restauró; el diario en la tarjeta dice qué terminó.",
+        # La unidad no se puede leer: se usa la copia en memoria de lo que se
+        # confirmó en el diario (incluye lo de ejecuciones anteriores si es --resume).
+        confirmed = getattr(execution, "confirmed", {}) or {}
+        applied_count = sum(1 for status in confirmed.values() if status == runs.APPLIED)
+        failed_count = len(confirmed) - applied_count
+        pending = execution.state.get("totals", {}).get("entries", 0) - len(confirmed)
+        error_console.print("Resumen según lo confirmado en el diario (la unidad no se puede leer ahora):",
+                            markup=False)
+        error_console.print(f"  Aplicadas (archivos): {applied_count}", markup=False)
+        if failed_count:
+            error_console.print(f"  Con error (archivos): {failed_count}", markup=False)
+        if pending > 0:
+            error_console.print(f"  Sin aplicar (pendientes): {pending}", markup=False)
+        error_console.print("El resto no se modificó o se restauró; el diario en la tarjeta dice qué terminó.",
                             markup=False)
         error_console.print("Cuando vuelvas a conectar la unidad, para continuar:")
         print_copyable(error_console, f'choconostle {execution.state["command"]} "{path}" --resume "{execution.folder}"')
@@ -429,11 +443,13 @@ def _resume(path, folder, console, error_console, progress, show_limit, diff,
         raise typer.Exit(code=2)
     normalizer = runs.processor_for(execution)
     try:
-        problems = runs.resume_check(execution, path, normalizer, command)
+        problems = runs.resume_check(execution, path, normalizer, command, progress=progress)
     except OSError as exc:
+        progress.stop()
         print_copyable(error_console, f"No se puede reanudar: la biblioteca o su respaldo no están accesibles ({exc}). "
                                       "No se modificó nada; vuelve a intentarlo cuando la unidad esté conectada.", "red")
         raise typer.Exit(code=3)
+    progress.stop()
     if problems:
         error_console.print("No se puede reanudar con seguridad; no se modificó nada:", style="red")
         for problem in problems:
@@ -467,17 +483,38 @@ class _RunProgress:
         self.stop()
         if not self.enabled:
             return
+        # expand=True: cada actualización ocupa el ancho completo de la terminal
+        # (rellena con espacios) y el texto variable se recorta con «…». Así no
+        # quedan restos de un nombre anterior más largo en las consolas que no
+        # borran la línea antes de redibujarla.
         self.progress = Progress(
-            SpinnerColumn(), TextColumn("{task.description}"), BarColumn(), MofNCompleteColumn(),
-            TextColumn("{task.fields[stats]}"), TimeElapsedColumn(),
-            TextColumn("restante (estimado)"), TimeRemainingColumn(),
-            console=self.console, transient=True,
+            SpinnerColumn(), TextColumn("{task.description}"),
+            BarColumn(bar_width=None, table_column=Column(ratio=1)), MofNCompleteColumn(),
+            TextColumn("{task.fields[stats]}", table_column=Column(ratio=2, no_wrap=True, overflow="ellipsis")),
+            TimeElapsedColumn(), TextColumn("restante (estimado)"), TimeRemainingColumn(),
+            console=self.console, transient=True, expand=True,
         )
         self.progress.start()
         self.task = self.progress.add_task(description, total=total, completed=completed, stats="")
 
     def start_plan(self, total: int) -> None:
         self._start("Planificando", total)
+
+    # Interfaz genérica (revert, comprobación de --resume, clean-backups).
+    def start(self, description: str, total: int | None, completed: int = 0) -> None:
+        self._description = description
+        self._start(description, total, completed)
+
+    def tick(self, count: int = 1, current: str = "") -> None:
+        if self.progress is not None:
+            # Solo el nombre del archivo: si no cabe, se recorta por el final con «…».
+            name = current.replace("\\", "/").rsplit("/", 1)[-1] if current else ""
+            self.progress.update(self.task, advance=count, stats=name)
+
+    def step(self, text: str) -> None:
+        """Paso en curso dentro del archivo actual (p. ej. una verificación larga)."""
+        if self.progress is not None:
+            self.progress.update(self.task, stats=text)
 
     def start_apply(self, total: int, completed: int = 0) -> None:
         self._start("Aplicando", total, completed)
@@ -635,17 +672,22 @@ def revert(
         help="Restaura también las letras que cambiaron después de normalizarlas.",
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Solo muestra qué se restauraría."),
+    no_progress: bool = typer.Option(False, "--no-progress", help="No muestra el progreso."),
 ) -> None:
     """Restaura las letras originales desde una carpeta de respaldo (normalize-lyrics o convert-lyrics)."""
     _safe_streams()
     console = Console(highlight=False)
     error_console = Console(stderr=True, highlight=False)
+    progress = _RunProgress(error_console, enabled=not no_progress and error_console.is_terminal)
     try:
         folder = backup.resolve_backup(folder.expanduser(), latest=latest)
         if latest:
             console.print("Respaldo más reciente:")
             print_copyable(console, str(folder))
-        results = backup.revert(folder, force=force, dry_run=dry_run)
+        try:
+            results = backup.revert(folder, force=force, dry_run=dry_run, progress=progress)
+        finally:
+            progress.stop()
     except backup.RevertNoSpace as exc:
         print_copyable(error_console, str(exc), "red")
         raise typer.Exit(code=2)
@@ -706,14 +748,20 @@ def clean_backups(
         False, "--apply",
         help="Borra los respaldos. Sin esta opción solo se muestra qué se borraría.",
     ),
+    no_progress: bool = typer.Option(False, "--no-progress", help="No muestra el progreso."),
 ) -> None:
     """Borra respaldos antiguos de ChoconostleLRCTool_back (nunca los incompletos o reanudables)."""
     _safe_streams()
     console = Console(highlight=False)
     path = path.expanduser()
     stopped = None
+    error_console = Console(stderr=True, highlight=False)
+    progress = _RunProgress(error_console, enabled=not no_progress and error_console.is_terminal)
     try:
-        remove, keep = runs.clean_backups(path, older_than, apply=apply)
+        try:
+            remove, keep = runs.clean_backups(path, older_than, apply=apply, progress=progress)
+        finally:
+            progress.stop()
     except runs.CleanStopped as stop:
         remove, keep, stopped = stop.remove, stop.keep, stop
     except OSError as exc:

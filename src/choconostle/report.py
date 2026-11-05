@@ -6,7 +6,7 @@ Genera el reporte de la biblioteca a partir de un escaneo.
 Responsabilidades:
 - Calcular estadísticas (formatos, letras, álbumes, portadas).
 - Mostrar el reporte en la terminal.
-- Exportar el reporte completo a JSON (entrada para la Fase 2).
+- Exportar el reporte completo a JSON.
 
 Autor: AndrewSkarlet
 Licencia: MIT
@@ -364,7 +364,7 @@ def print_report(report: dict, console: Console | None = None, limit: int = 20) 
     issues = report["lyrics_issues"]
     to_fix = report["lyrics_to_fix"]
     if to_fix:
-        _section(console, f"Letras a corregir en la Fase 2 ({len(to_fix)})")
+        _section(console, f"Letras con cabeceras u otros problemas ({len(to_fix)})")
         console.print(
             f"Con cabeceras: {issues['with_headers']}   Con BOM: {issues['with_bom']}   "
             f"No UTF-8: {issues['not_utf8']}"
@@ -376,7 +376,7 @@ def print_report(report: dict, console: Console | None = None, limit: int = 20) 
                 markup=False,
             )
         console.print(
-            "Poweramp (Android) no carga letras con cabeceras; la Fase 2 las corregirá.",
+            "normalize-lyrics y convert-lyrics pueden corregirlas.",
             style="dim",
         )
         shown, hidden = _limited(to_fix, limit)

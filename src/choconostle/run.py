@@ -52,7 +52,7 @@ from choconostle.embedded import open_editor
 from choconostle.rawtags import MODE_FULL, Unsupported, apply_patches, patches_to_json, sha256
 from choconostle.rawtags.ogg import OggEditor
 from choconostle.rawtags.writer import (
-    TEMP_SUFFIX, VERIFY_AUTO, ChangedError, Journal, RestoreError, WriteError, file_sha256,
+    TEMP_SUFFIX, VERIFY_AUTO, VERIFY_FULL, ChangedError, Journal, RestoreError, WriteError, file_sha256,
     effective_verify, file_signature, read_at, recover, rewrite_with, write_edit,
 )
 from choconostle.scanner import iter_folders
@@ -104,6 +104,13 @@ DEVICE_WINERRORS = {
 }
 
 
+def _progress_call(progress, method: str, *args) -> None:
+    """Llama a un método del indicador de progreso si existe (es opcional)."""
+    function = getattr(progress, method, None) if progress is not None else None
+    if function is not None:
+        function(*args)
+
+
 def checkpoint(step: str, record: dict) -> None:
     """Punto entre pasos del diario (las pruebas lo usan para simular cortes)."""
 
@@ -143,15 +150,37 @@ def write_json_atomic(path: Path, data: dict) -> None:
     os.replace(long_path(temporary), long_path(path))
 
 
+def _open_jsonl(path: Path, mode: str):
+    """
+    Abre un archivo del respaldo para leerlo, o None si no existe.
+
+    No se usa Path.exists(): en Windows, con la tarjeta SD quitada, devuelve
+    False (WinError 21, 3...) en vez de fallar, y el diario se leía como
+    vacío («Aplicadas 0»). Aquí, si el archivo no aparece y tampoco su
+    carpeta, el error se propaga como el de una unidad desconectada.
+    """
+    kwargs = {"encoding": "utf-8"} if "b" not in mode else {}
+    try:
+        return open(long_path(path), mode, **kwargs)
+    except FileNotFoundError:
+        try:
+            if stat.S_ISDIR(os.stat(long_path(Path(path).parent)).st_mode):
+                return None  # la carpeta está: el archivo simplemente no existe
+        except FileNotFoundError:
+            pass
+        raise
+
+
 def iter_jsonl(path: Path):
     """
     Líneas JSON de un archivo. Una línea a medias (corte de luz o unidad
     desconectada mientras se escribía) se ignora: lo que no llegó entero
     al disco no cuenta como confirmado.
     """
-    if not path.exists():
+    handle = _open_jsonl(path, "r")
+    if handle is None:
         return
-    with open(long_path(path), "r", encoding="utf-8") as handle:
+    with handle:
         for line in handle:
             if not line.endswith("\n"):
                 return
@@ -163,9 +192,10 @@ def iter_jsonl(path: Path):
 
 def _jsonl_offsets(path: Path):
     """(posición, evento) de cada línea completa, con las mismas reglas que iter_jsonl."""
-    if not path.exists():
+    handle = _open_jsonl(path, "rb")
+    if handle is None:
         return
-    with open(long_path(path), "rb") as handle:
+    with handle:
         offset = 0
         for line in handle:
             start, offset = offset, offset + len(line)
@@ -266,6 +296,9 @@ class Run:
         if self.state.get("format") != FORMAT:
             raise ValueError(f"Formato de ejecución desconocido: {self.state.get('format')}")
         self._diary = None
+        # Copia en memoria de lo confirmado en el diario ({id: estado}), para
+        # el resumen del paro cuando la unidad ya no se puede leer.
+        self.confirmed: dict[int, str] = {}
 
     @classmethod
     def create(cls, root: Path, command: str, options: dict, temporary: bool = False,
@@ -342,6 +375,8 @@ class Run:
                 handle.seek(0, os.SEEK_END)
             handle.write(prefix + (json.dumps(data, ensure_ascii=False) + "\n").encode("utf-8"))
             fsync_file(handle)
+        if data.get("event") == "done":
+            self.confirmed[data["id"]] = data.get("status")
 
     def events(self):
         yield from iter_jsonl(self.folder / DIARY_NAME)
@@ -688,6 +723,7 @@ def apply_run(run: Run, normalizer, root: Path, progress=None, resume: bool = Fa
     journal = Journal(run.folder)
     try:
         intents, done = run.outcome()
+        run.confirmed = {event["id"]: event.get("status") for event in done.values()}
         if not resume:
             _log_header(run, root)
         else:
@@ -702,7 +738,7 @@ def apply_run(run: Run, normalizer, root: Path, progress=None, resume: bool = Fa
             if record["type"] == "file":
                 status, error = _apply_file(run, normalizer, root, record)
             else:
-                status, error = _apply_audio(run, root, record, journal, verify)
+                status, error = _apply_audio(run, root, record, journal, verify, progress)
             if status == APPLIED:
                 summary.applied += 1
             else:
@@ -821,7 +857,8 @@ def _apply_file(run: Run, normalizer, root: Path, record: dict) -> tuple[str, st
     return _finish(run, record, APPLIED, None)
 
 
-def _apply_audio(run: Run, root: Path, record: dict, journal: Journal, verify: str) -> tuple[str, str | None]:
+def _apply_audio(run: Run, root: Path, record: dict, journal: Journal, verify: str,
+                 progress=None) -> tuple[str, str | None]:
     path = root / record["path"]
     plan = record["plan"]
     changed = [slot for slot in record["slots"] if slot["status"] == "change"]
@@ -875,12 +912,15 @@ def _apply_audio(run: Run, root: Path, record: dict, journal: Journal, verify: s
         checkpoint("backup", record)
         _diary(run, root, intent)
         checkpoint("intent", record)
+        if is_ogg or verify == VERIFY_FULL:
+            _progress_call(progress, "step", f"verificando el audio completo: {path.name}")
         if is_ogg:
             result = rewrite_with(path, tuple(plan["signature"]), lambda tmp: OggEditor.modify(tmp, values),
                                   lambda original, tmp: editor.check(original, tmp, edit.expected))
         else:
             result = write_edit(path, editor, edit, journal, f"edit-{record['id']:06d}",
                                 tuple(plan["signature"]), record["path"], verify)
+        _progress_call(progress, "step", "")
         checkpoint("written", record)
     except RestoreError as exc:
         raise StopRun("restore", f"ERROR GRAVE en {record['path']}: {exc}") from exc
@@ -958,7 +998,7 @@ def processor_for(run: Run):
     return LyricsNormalizer.from_options(options)
 
 
-def resume_check(run: Run, root: Path, normalizer, command: str | None = None) -> list[str]:
+def resume_check(run: Run, root: Path, normalizer, command: str | None = None, progress=None) -> list[str]:
     """
     Comprueba que la ejecución se puede reanudar con seguridad y resuelve
     las entradas que quedaron a medias. Retorna los problemas; si hay
@@ -989,11 +1029,14 @@ def resume_check(run: Run, root: Path, normalizer, command: str | None = None) -
 
     intents, done = run.outcome()
     resolved = []
+    _progress_call(progress, "start", "Comprobando lo ya aplicado", len(intents))
     for record in run.plan_records():
         if record["status"] != "change":
             continue
         entry = record["id"]
         intent = intents.get(entry)
+        if intent is not None:
+            _progress_call(progress, "tick", 1, record["path"])
         if entry in done and done[entry]["status"] == APPLIED:
             problem = _check_applied(run, root, record, intent)
             if problem:
@@ -1135,7 +1178,7 @@ def revert_space_needed(run: Run) -> int:
 REVERT_ITEM_KEYS = ("id", "kind", "path", "label")
 
 
-def revert_run(folder: Path, force: bool = False, dry_run: bool = False) -> list:
+def revert_run(folder: Path, force: bool = False, dry_run: bool = False, progress=None) -> list:
     """
     Deshace una ejecución (formato 3) a partir de su plan y su diario.
 
@@ -1167,12 +1210,18 @@ def revert_run(folder: Path, force: bool = False, dry_run: bool = False) -> list
                 raise backup.RevertNoSpace(
                     f"Espacio libre insuficiente para revertir: se necesitan {format_size(needed)} y hay "
                     f"{format_size(free)}. No se modificó nada.")
+            if Journal(run.folder).pending():  # la línea solo aparece si hay algo que recuperar
+                _progress_call(progress, "start", "Recuperando escrituras pendientes", None)
             recover(run.folder, root)
         intents, done = run.outcome()
+        _progress_call(progress, "start", "Comprobando" if dry_run else "Revirtiendo",
+                       run.state.get("totals", {}).get("entries"))
         for record in run.plan_records():
             if record["status"] != "change":
                 continue
+            _progress_call(progress, "tick", 0, record["path"])
             new = _revert_record(run, root, record, intents, done, force, dry_run)
+            _progress_call(progress, "tick", 1, "")
             for result in new:
                 # Solo lo que usan el registro y la consola: la letra original
                 # ocupaba en memoria hasta terminar (etapa ⑥).
@@ -1371,7 +1420,7 @@ def _delete_backup(info: BackupInfo) -> None:
 
 
 def clean_backups(root: Path, older_than_days: int, apply: bool = False,
-                  now: datetime | None = None) -> tuple[list[BackupInfo], list[BackupInfo]]:
+                  now: datetime | None = None, progress=None) -> tuple[list[BackupInfo], list[BackupInfo]]:
     """
     (a borrar, a conservar). Solo borra con apply=True y nunca una
     ejecución incompleta, reanudable o con escrituras pendientes. Los
@@ -1383,6 +1432,7 @@ def clean_backups(root: Path, older_than_days: int, apply: bool = False,
     """
     now = now or datetime.now()
     remove, keep = [], []
+    _progress_call(progress, "start", "Revisando respaldos", None)
     for info in list_backups(root):
         if info.kind == "borrado interrumpido":
             remove.append(info)
@@ -1397,7 +1447,9 @@ def clean_backups(root: Path, older_than_days: int, apply: bool = False,
             info.keep_reason = f"tiene {(now - info.created).days} días"
             keep.append(info)
     if apply:
+        _progress_call(progress, "start", "Borrando respaldos", len(remove))
         for info in remove:
+            _progress_call(progress, "tick", 0, info.folder.name)
             try:
                 _delete_backup(info)
             except OSError as exc:
@@ -1407,7 +1459,10 @@ def clean_backups(root: Path, older_than_days: int, apply: bool = False,
                     raise CleanStopped(remove, keep, kind,
                                        f"clean-backups se detuvo: la unidad dejó de responder ({exc}).") from exc
                 info.error = str(exc)
+                _progress_call(progress, "tick", 1, "")
                 continue
             info.deleted = True
+            _progress_call(progress, "tick", 1, "")
+    _progress_call(progress, "stop")
     return remove, keep
 

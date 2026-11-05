@@ -1,6 +1,29 @@
 # Changelog
 
-## Sin publicar
+## v1.0.0-rc1
+
+Versión candidata (`1.0.0rc1` en `pyproject.toml` y `config.py`).
+
+### Cambiado (commit 1: textos y empaquetado, sin cambios de lógica)
+- Versión 1.0.0rc1 y clasificador «Development Status :: 4 - Beta».
+- `pyproject.toml`: licencia como cadena SPDX (`license = "MIT"`), sin el clasificador de licencia y con `setuptools>=77` para construir (compatible con `requires-python = ">=3.9"`: setuptools 77 requiere Python 3.9 o posterior). `pip install -e .` ya no muestra los avisos de licencia. `LICENSE` no cambia.
+- El banner lista todos los comandos de la ayuda: scan, normalize-lyrics, convert-lyrics, revert, recover, clean-backups, fix-gallery, welcome y version.
+- `scan`: la sección «Letras a corregir en la Fase 2» pasa a «Letras con cabeceras u otros problemas», y la nota sobre Poweramp se sustituye por «normalize-lyrics y convert-lyrics pueden corregirlas».
+
+### Cambiado (commit 2: progreso, revert y resumen del paro)
+- **Progreso «N de M» con indicador animado** en `revert` («Revirtiendo»), en la comprobación previa de `--resume` («Comprobando lo ya aplicado», antes del avance de «Aplicando», que ya existía) y en `clean-backups` («Borrando respaldos»). En las verificaciones largas se indica el paso («verificando el audio completo: archivo»). Respeta `--no-progress` (nuevo en `revert` y `clean-backups`) y no se anima si la salida no es una terminal.
+- **`revert` era más lento que `--apply`** (14,5 s frente a 5,2 s con 28 archivos en una SD). Causa: deshacía cada edición incrustada con la verificación completa (hash de todo el audio antes y después de escribir) aunque `--apply` hubiera usado la rápida. Ahora `revert` usa la misma verificación que se usó al aplicar (la de `--verify`, guardada en el diario; `auto` en respaldos antiguos), que sigue comparando byte a byte la región editada y las etiquetas ajenas. Con la biblioteca de casos: 23 ediciones, todas con verificación rápida (antes, todas con la completa). No se ha vuelto a medir en una SD.
+- **Resumen del paro tras una desconexión.** Mostraba «Aplicadas 0 / Sin aplicar 42» aunque había archivos aplicados. Causa: con la SD quitada, en Windows `Path.exists()` devuelve False (WinError 21 o 3) en vez de fallar, y el diario y el plan se leían como vacíos. Ahora:
+  - leer el diario o el plan falla si tampoco está su carpeta, y no se toma como «vacío»;
+  - si la unidad no se puede leer, el resumen («Aplicadas», «Con error», «Sin aplicar») sale de la copia en memoria de los eventos `done` que se confirmaron en el diario, incluidos los de ejecuciones anteriores con `--resume`.
+  - Prueba nueva (`test_stop_summary_matches_diary`, en los modos «posix» y «windows», con ENOENT, WinError 21 y EIO) que compara el resumen con los eventos `done` del diario.
+
+### Corregido (ajuste cosmético)
+- La línea de progreso dejaba restos del nombre anterior (p. ej. «0:00:00Before).lrc») cuando el nuevo era más corto. No se reproduce en Linux, donde rich borra la línea antes de redibujarla; ocurre en consolas que no lo hacen. Ahora cada actualización ocupa el ancho completo de la terminal (rellena con espacios), no se parte en dos filas y muestra solo el nombre del archivo, recortado con «…» si no cabe.
+- `revert` ya no muestra «Recuperando escrituras pendientes» si no hay nada pendiente.
+
+### No probado
+- `[Errno 22] Invalid argument`, que apareció al desconectar una SD real, sigue sin tratarse como desconexión. No se probó con nombres de archivo no válidos en FAT, que también pueden darlo.
 
 ### Agregado
 - Comando `fix-gallery`: crea un `.nomedia` vacío en las carpetas de álbum para que las apps de galería no muestren las portadas. No abre ni modifica audio, letras ni etiquetas.
@@ -18,12 +41,9 @@
 - Nombre del autor: «AndrewSkarlet» en `LICENSE` (línea de Copyright), `pyproject.toml`, `config.py`, las cabeceras del código y el README.
 - `run.fatal_kind` acepta `backups=False` para no exigir la carpeta de respaldos (`fix-gallery` en simulación no la crea).
 
-### Pendiente
-- `pyproject.toml` usa el formato antiguo `license = { text = "MIT" }`. Las versiones recientes de setuptools prefieren `license = "MIT"` (SPDX). Se deja igual hasta que se decida cambiarlo.
-
 ## v0.3.0 - Fase 2.1: normalización segura, conversión de letras y escalabilidad
 
-Sube la versión menor por las incompatibilidades con la v0.2.0 (ver cada etapa). Los resultados de las pruebas en Windows y Android están en la descripción del PR y en `docs/TRASPASO_FASE_2_1.md`.
+Sube la versión menor por las incompatibilidades con la v0.2.0 (ver cada etapa). Los resultados de las pruebas en Windows y Android están en la descripción del PR. Lo que quedó sin hacer o sin probar está en `docs/PENDIENTES.md`.
 
 ### Mejoras pendientes (sin implementar)
 - `revert` no muestra progreso y es más lento que `--apply` (14,5 s frente a 5,2 s con 28 archivos en una SD).
