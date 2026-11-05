@@ -462,3 +462,44 @@ def test_backup_names_never_collide_with_interrupted_deletions(biblioteca, paths
     assert all(info.deleted for info in remove), [(i.folder, i.error) for i in remove]
     assert not leftover.exists() and not clash.exists()
     assert not list(base.glob("*.borrando*"))
+
+
+# --- Resumen del paro leído del diario -----------------------------------------
+
+def _drive_gone() -> OSError:
+    return OSError(errno.ENOENT, "No such file or directory (unidad quitada, simulado)")
+
+
+@pytest.mark.parametrize("paths", PATH_MODES)
+@pytest.mark.parametrize("error", [_drive_gone, lambda: win_error(21), eio],
+                         ids=["ENOENT", "WinError21", "EIO"])
+def test_stop_summary_matches_diary(biblioteca, monkeypatch, paths, error):
+    """
+    Tras una desconexión, el resumen «Aplicadas / Con error / Sin aplicar»
+    coincide con los eventos done del diario. Antes, en Windows, Path.exists()
+    devolvía False con la SD quitada (WinError 21 o ENOENT), el diario se
+    leía como vacío y el resumen decía «Aplicadas 0».
+    """
+    import re
+    unplug = Unplug(monkeypatch, biblioteca, after=8, error=error, paths=paths)
+    args = ["normalize-lyrics", str(biblioteca), "--strip-headers", "--apply", "--allow-full-rewrite",
+            "--no-progress", *sum((["--only", o] for o in ONLY), [])]
+    result = runner.invoke(app, args, env={"COLUMNS": "200"})
+    assert unplug.unplugged
+    assert result.exit_code == 3, result.output
+    monkeypatch.undo()  # se vuelve a conectar para leer el diario
+    folder = next((biblioteca / BACKUP_DIR_NAME).iterdir())
+    run = runs.Run(folder)
+    _intents, done = run.outcome()
+    events = list(done.values())
+    applied = sum(1 for event in events if event["status"] == runs.APPLIED)
+    failed = len(events) - applied
+    pending = run.state["totals"]["entries"] - len(events)
+    assert applied > 0
+
+    def shown(label):
+        match = re.search(rf"{label} \(\w+\):?\s+(\d+)", result.output)
+        return int(match.group(1)) if match else 0
+    assert shown("Aplicadas") == applied, result.output
+    assert shown("Con error") == failed, result.output
+    assert shown("Sin aplicar") == pending, result.output

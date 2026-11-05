@@ -10,6 +10,17 @@ Versión candidata (`1.0.0rc1` en `pyproject.toml` y `config.py`).
 - El banner lista todos los comandos de la ayuda: scan, normalize-lyrics, convert-lyrics, revert, recover, clean-backups, fix-gallery, welcome y version.
 - `scan`: la sección «Letras a corregir en la Fase 2» pasa a «Letras con cabeceras u otros problemas», y la nota sobre Poweramp se sustituye por «normalize-lyrics y convert-lyrics pueden corregirlas».
 
+### Cambiado (commit 2: progreso, revert y resumen del paro)
+- **Progreso «N de M» con indicador animado** en `revert` («Revirtiendo»), en la comprobación previa de `--resume` («Comprobando lo ya aplicado», antes del avance de «Aplicando», que ya existía) y en `clean-backups` («Borrando respaldos»). En las verificaciones largas se indica el paso («verificando el audio completo: archivo»). Respeta `--no-progress` (nuevo en `revert` y `clean-backups`) y no se anima si la salida no es una terminal.
+- **`revert` era más lento que `--apply`** (14,5 s frente a 5,2 s con 28 archivos en una SD). Causa: deshacía cada edición incrustada con la verificación completa (hash de todo el audio antes y después de escribir) aunque `--apply` hubiera usado la rápida. Ahora `revert` usa la misma verificación que se usó al aplicar (la de `--verify`, guardada en el diario; `auto` en respaldos antiguos), que sigue comparando byte a byte la región editada y las etiquetas ajenas. Con la biblioteca de casos: 23 ediciones, todas con verificación rápida (antes, todas con la completa). No se ha vuelto a medir en una SD.
+- **Resumen del paro tras una desconexión.** Mostraba «Aplicadas 0 / Sin aplicar 42» aunque había archivos aplicados. Causa: con la SD quitada, en Windows `Path.exists()` devuelve False (WinError 21 o 3) en vez de fallar, y el diario y el plan se leían como vacíos. Ahora:
+  - leer el diario o el plan falla si tampoco está su carpeta, y no se toma como «vacío»;
+  - si la unidad no se puede leer, el resumen («Aplicadas», «Con error», «Sin aplicar») sale de la copia en memoria de los eventos `done` que se confirmaron en el diario, incluidos los de ejecuciones anteriores con `--resume`.
+  - Prueba nueva (`test_stop_summary_matches_diary`, en los modos «posix» y «windows», con ENOENT, WinError 21 y EIO) que compara el resumen con los eventos `done` del diario.
+
+### No probado
+- `[Errno 22] Invalid argument`, que apareció al desconectar una SD real, sigue sin tratarse como desconexión. No se probó con nombres de archivo no válidos en FAT, que también pueden darlo.
+
 ### Agregado
 - Comando `fix-gallery`: crea un `.nomedia` vacío en las carpetas de álbum para que las apps de galería no muestren las portadas. No abre ni modifica audio, letras ni etiquetas.
   - Simulación por defecto y `--apply`. Solo en carpetas con imágenes (jpg, jpeg, png, webp, bmp, gif, sin distinguir mayúsculas) y sin `.nomedia`; `--all-folders` lo pone en todas las carpetas con audio.

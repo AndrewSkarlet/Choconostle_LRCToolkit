@@ -38,8 +38,8 @@ from choconostle.rawtags import (
 )
 from choconostle.rawtags.ogg import OggEditor
 from choconostle.rawtags.writer import (
-    RECOVERED_COMPLETE, RECOVERED_FAILED, ChangedError, Journal, RestoreError, WriteError,
-    file_sha256, file_signature, recover, rewrite_with, write_edit,
+    RECOVERED_COMPLETE, RECOVERED_FAILED, VERIFY_AUTO, ChangedError, Journal, RestoreError, WriteError,
+    effective_verify, file_sha256, file_signature, recover, rewrite_with, write_edit,
 )
 from choconostle.textio import diff_lines
 from choconostle.utils import write_file_atomic
@@ -349,7 +349,7 @@ def load_manifest(folder: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def revert(folder: Path, force: bool = False, dry_run: bool = False) -> list[RevertResult]:
+def revert(folder: Path, force: bool = False, dry_run: bool = False, progress=None) -> list[RevertResult]:
     """
     Restaura las letras originales desde una carpeta de respaldo.
 
@@ -360,7 +360,7 @@ def revert(folder: Path, force: bool = False, dry_run: bool = False) -> list[Rev
     folder = Path(folder)
     if _is_run(folder):
         from choconostle.run import revert_run
-        return revert_run(folder, force=force, dry_run=dry_run)
+        return revert_run(folder, force=force, dry_run=dry_run, progress=progress)
     manifest = load_manifest(folder)
     root = _library_root(folder, manifest)
     results: list[RevertResult] = []
@@ -465,8 +465,12 @@ def _revert_edit(record: dict, items: list[dict], folder: Path, root: Path, dry_
                      if item.get("new_encoding") is not None and item.get("original_encoding") is not None
                      and item["new_encoding"] != item["original_encoding"]}
         edit = Edit(inverse, mode, len(current), len(original), "", expected, encodings)
+        # La misma verificación que se usó al aplicar (auto: rápida en su sitio,
+        # completa al reescribir). Antes se usaba siempre la completa (hash de
+        # todo el audio dos veces), y revert tardaba casi el triple que --apply.
         write_edit(path, editor, edit, Journal(folder), f"revert-{record['id']:04d}",
-                   file_signature(path), record["path"])
+                   file_signature(path), record["path"],
+                   verify=effective_verify(record.get("verify", VERIFY_AUTO), mode))
         _restore_mtime(path, record)
     except (Unsupported, ChangedError, WriteError, OSError, ValueError, KeyError) as exc:
         return all_items(REVERT_ERROR, f"No se pudo restaurar: {exc}", exc)
