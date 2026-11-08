@@ -2,6 +2,14 @@
 
 ## v1.0.0-rc2
 
+Versión candidata (`1.0.0rc2` en `pyproject.toml` y `config.py`). Novedades:
+- Huella del audio en el plan: los cambios externos entre planificar y aplicar se detectan aunque la fecha de modificación no cambie (Android). Sin `--verify full` solo cubre el primer y el último MB.
+- Tiempo total al final de los resúmenes y en `registro.txt`.
+- Vista compacta para terminales estrechas, `--compact`, `--full`, `CHOCONOSTLE_COMPACT` y `--export ARCHIVO`.
+
+### Cambiado (commit 4: versión)
+- Versión 1.0.0rc2 en `pyproject.toml`, `src/choconostle/config.py` y este archivo.
+
 ### Agregado (commit 3: vista compacta)
 - **Vista compacta para terminales estrechas** (Termux en vertical) en `normalize-lyrics`, `convert-lyrics`, `revert`, `clean-backups` y `fix-gallery`. Se activa sola con menos de 70 columnas; `--compact` la fuerza, `--full` la desactiva (las dos juntas: código 2) y `CHOCONOSTLE_COMPACT=1` la deja fija (`=0`, la completa). Si el ancho de la terminal no se puede leer, vista completa.
   - Progreso en una sola línea corta: indicador animado, N/M archivos y tiempo restante. Respeta `--no-progress` y no se anima si la salida no es una terminal.

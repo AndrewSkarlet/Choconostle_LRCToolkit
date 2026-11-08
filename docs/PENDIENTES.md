@@ -1,6 +1,6 @@
 # Pendientes
 
-Lo que no se hizo o no se probó en la versión 1.0.0rc1. Las decisiones ya tomadas y lo que está hecho se describen en `README.md` y `CHANGELOG.md`.
+Lo que no se hizo o no se probó en la versión 1.0.0rc2. Las decisiones ya tomadas y lo que está hecho se describen en `README.md` y `CHANGELOG.md`.
 
 ## No probado
 
