@@ -2,6 +2,16 @@
 
 ## v1.0.0-rc2
 
+### Agregado (commit 3: vista compacta)
+- **Vista compacta para terminales estrechas** (Termux en vertical) en `normalize-lyrics`, `convert-lyrics`, `revert`, `clean-backups` y `fix-gallery`. Se activa sola con menos de 70 columnas; `--compact` la fuerza, `--full` la desactiva (las dos juntas: código 2) y `CHOCONOSTLE_COMPACT=1` la deja fija (`=0`, la completa). Si el ancho de la terminal no se puede leer, vista completa.
+  - Progreso en una sola línea corta: indicador animado, N/M archivos y tiempo restante. Respeta `--no-progress` y no se anima si la salida no es una terminal.
+  - En vez de la lista de cambios, solo el resumen (a modificar, con desconocidos, sin cambios, omitidas y errores), con el número de letras con cabeceras desconocidas y la sugerencia de `--export`.
+  - Se siguen mostrando completos los errores y conflictos (archivo y motivo), los comandos para copiar en una sola línea (`--resume`, `revert`, «Respaldo guardado en») y el aviso de desconexión (código 3).
+- **`--export ARCHIVO`** en los cinco comandos, también en la simulación: guarda la lista completa (archivos, cabeceras y diferencias) en texto. Si la carpeta del archivo no existe, código 2 antes de hacer nada.
+- **Bloque final en las dos vistas:** resumen, tiempo total, ruta del respaldo y siguiente acción («Para aplicar, repite el comando con --apply. Antes se guardará un respaldo en: <ruta>»). En la simulación la ruta se muestra como «se guardará en», nunca como ya creada. La vista completa no cambia salvo este bloque.
+- Documentado en `README.md` («Vista compacta») y `README.en.md`.
+- Pruebas nuevas en `tests/test_cli.py`: elección de vista (`--compact`, `--full`, `CHOCONOSTLE_COMPACT`, ancho menor de 70, ancho ilegible) en los modos posix y windows, salida compacta, `--export`, progreso compacto.
+
 ### Agregado (commit 2: tiempo total)
 - **Tiempo total** al final del resumen de `normalize-lyrics` y `convert-lyrics` (simulación, `--diff`, `--apply` y `--resume`), `revert` y `fix-gallery`: «Tiempo total: 2,3 s», «2 min 05 s» o «1 h 02 min 05 s». Se mide con `time.perf_counter()` desde el inicio del comando y también se muestra cuando termina con error (código 1, 2, 3 o Ctrl+C), en la salida de errores.
 - Se escribe en `registro.txt` de la carpeta de respaldo con `--apply` (y «(reanudación)» con `--resume`). `revert` lo escribe en su `revert_<fecha>.txt` y añade «(revert del <fecha>)» a `registro.txt`. La simulación y `fix-gallery` no tienen `registro.txt`: solo se muestra en pantalla.

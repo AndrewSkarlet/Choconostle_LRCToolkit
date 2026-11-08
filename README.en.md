@@ -98,6 +98,18 @@ choconostle clean-backups ~/Music --older-than 30 --apply
 
 Never deletes incomplete or resumable runs. Details: [Limpieza de respaldos](README.md#limpieza-de-respaldos).
 
+### Compact view (narrow terminals)
+
+For Termux in portrait mode. Applies to `normalize-lyrics`, `convert-lyrics`, `revert`, `clean-backups` and `fix-gallery`.
+
+- **When:** `--compact` forces it and `--full` turns it off (both together are an error). Otherwise `CHOCONOSTLE_COMPACT=1` keeps it on (and `=0` off). Otherwise it turns on by itself when the terminal has fewer than 70 columns. If the width cannot be read (output redirected), the full view is used.
+- **Progress:** one short line with a spinner, files done (N/M) and time remaining. It respects `--no-progress` and does not animate when the output is not a terminal.
+- **Output:** instead of the list of changes, only the summary: to modify, with unknown headers, unchanged, skipped and errors. Errors and conflicts (file and reason), the commands to copy (`--resume`, `revert`, the backup path) and the SD card disconnection notice (exit code 3) are still shown in full.
+- **`--export FILE`** saves the full list (files, headers and diffs) to a text file, also in simulation mode and in both views.
+- **Final block (both views):** the summary, the total time, the backup path and the next step. In simulation mode the path is where the backup *will be* saved. The total time is also shown when the command ends with an error, and with `--apply`, `--resume` and `revert` it is written to `registro.txt`.
+
+Details: [Vista compacta](README.md#vista-compacta-terminales-estrechas).
+
 Other commands: `recover` (leaves each interrupted write as the original or as applied, without resuming the run), `welcome` and `version`.
 
 ## Tested / Not tested

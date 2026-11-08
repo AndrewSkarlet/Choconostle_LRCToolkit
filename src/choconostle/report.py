@@ -24,7 +24,7 @@ from rich.table import Table
 from rich.text import Text
 
 from choconostle.albums import GROUP_BY_FOLDER, GROUP_BY_TAG, group_albums
-from choconostle.config import APP_NAME, APP_VERSION
+from choconostle.config import APP_NAME, APP_VERSION, BACKUP_DIR_NAME
 from choconostle.models.album import Album
 from choconostle.models.lyrics import SOURCE_EXTERNAL, LyricsInfo
 from choconostle.models.track import LYRICS_NONE, LYRICS_SYNCED, LYRICS_UNSYNCED, Track
@@ -542,11 +542,18 @@ def print_run_report(
     applied: bool = False,
     summary=None,
     options: list[str] | None = None,
+    compact: bool = False,
+    export: Path | None = None,
 ) -> None:
     """
     Reporte de normalize-lyrics o convert-lyrics leído desde el plan y el
     diario en disco (simulación o resultado de --apply). Cada sección
     recorre el plan sin cargarlo entero en memoria.
+
+    Con `compact` (terminales estrechas) no se listan los cambios: solo los
+    errores completos y el bloque final (resumen, tiempo total, respaldo y
+    siguiente acción), que también sale en la vista completa. `export` es
+    el archivo donde ya se guardó la lista completa (--export), si se pidió.
     """
     from choconostle.normalizer import MODE_STRIP, skip_reason_label
 
@@ -577,7 +584,9 @@ def print_run_report(
         title = "SIMULACIÓN (no se modificó nada)"
     command = run.state.get("command", "normalize-lyrics")
     console.print(f"[bold]{command} - {title}[/bold]")
-    if command == "convert-lyrics":
+    if compact:
+        pass
+    elif command == "convert-lyrics":
         for line in convert_option_lines(options_state):
             console.print(line, markup=False)
     else:
@@ -585,27 +594,33 @@ def print_run_report(
         console.print(f"Modo: {'quitar cabeceras' if mode == MODE_STRIP else 'estandarizar cabeceras (ar, ti, al, length)'}",
                       markup=False)
         console.print(f"Codificación de archivos .lrc/.txt: {options_state['encoding']}", markup=False)
-    for option in options or []:
+    for option in [] if compact else options or []:
         console.print(option, markup=False)
     print_copyable(console, f"Biblioteca: {root}")
+    applied_count = failed_count = 0
+    if applied and summary is not None:
+        for event in done.values():
+            if event["status"] == "applied":
+                applied_count += 1
+            else:
+                failed_count += 1
+    changes = statuses.get("change", 0)
+    if compact:
+        _compact_failures(console, run, done if applied else {})
+        _run_final_block(console, run, root, command, totals, statuses, applied, summary,
+                         applied_count, failed_count, compact, export)
+        return
 
     _section(console, "Resumen")
     table = Table(show_header=False, box=None, padding=(0, 2))
     table.add_column(style="bold")
     table.add_column()
     table.add_row("Letras revisadas", str(totals["lyrics"]))
-    changes = statuses.get("change", 0)
     table.add_row("A modificar" if not applied else "Planeadas",
                   f"{changes} ({plural(totals['files_changed'], 'archivo')}, "
                   f"{plural(totals['embedded_changed'], 'incrustada')}) en "
                   f"{plural(totals['songs_changed'], 'canción', 'canciones')}")
     if applied and summary is not None:
-        applied_count = failed_count = 0
-        for event in done.values():
-            if event["status"] == "applied":
-                applied_count += 1
-            else:
-                failed_count += 1
         table.add_row("Aplicadas (archivos)", str(applied_count))
         if failed_count:
             table.add_row("Con error (archivos)", f"[red]{failed_count}[/red]")
@@ -736,17 +751,74 @@ def print_run_report(
     listing("Omitidas", lambda item: item["status"] == "skipped", "dim")
     listing("Errores", lambda item: item["status"] == "error", "red")
 
+    _run_final_block(console, run, root, command, totals, statuses, applied, summary,
+                     applied_count, failed_count, compact, export)
+
+
+def _compact_failures(console: Console, run, done) -> None:
+    """Vista compacta: los errores y fallos se muestran completos (archivo y motivo), sin límite."""
+    failed = []
+    for record in run.plan_records():
+        result = done.get(record["id"])
+        if record["status"] == "change" and result is not None and result["status"] != "applied":
+            failed.append(f"  {record['path']}: FALLÓ: {result.get('error')}")
+        if record["type"] == "file":
+            items = [(record, record["path"])]
+        else:
+            items = [(slot, f"{record['path']} [{slot['label']}]") for slot in record["slots"]]
+        for item, where in items:
+            if item["status"] == "error":
+                failed.append(f"  {where}: {item['message']}")
+    if failed:
+        _section(console, f"Errores ({len(failed)})")
+        for line in failed:
+            print_copyable(console, line, "red")
+
+
+def run_summary_line(totals, statuses, applied: bool, applied_count: int = 0, failed_count: int = 0) -> str:
+    """Resumen en una línea (letras): a modificar, con desconocidos, sin cambios, omitidas y errores."""
+    parts = [f"{statuses.get('change', 0)} {'planeadas' if applied else 'a modificar'}"]
+    if applied:
+        parts.append(f"{plural(applied_count, 'archivo')} aplicados")
+        if failed_count:
+            parts.append(f"{plural(failed_count, 'archivo')} con error")
+        pending = totals["entries"] - applied_count - failed_count
+        if pending > 0:
+            parts.append(f"{pending} sin aplicar")
+    parts += [f"{totals['unknown'] + statuses.get('decision', 0)} con desconocidos",
+              f"{statuses.get('unchanged', 0)} sin cambios",
+              f"{statuses.get('skipped', 0)} omitidas",
+              f"{statuses.get('error', 0)} errores"]
+    return f"Resumen ({plural(totals['lyrics'], 'letra')}): " + ", ".join(parts)
+
+
+def _run_final_block(console: Console, run, root: Path, command: str, totals, statuses, applied: bool,
+                     summary, applied_count: int, failed_count: int, compact: bool,
+                     export: Path | None) -> None:
+    """Bloque final de las dos vistas: resumen, tiempo total, respaldo y siguiente acción."""
+    changes = statuses.get("change", 0)
     console.print()
+    console.print(run_summary_line(totals, statuses, applied and summary is not None, applied_count,
+                                   failed_count), markup=False)
+    unknown = totals["unknown"] + statuses.get("decision", 0)
+    if export is not None:
+        console.print("Lista completa (archivos, cabeceras y diferencias) guardada en:", markup=False)
+        print_copyable(console, str(export))
+    elif compact and unknown:
+        console.print(f"{plural(unknown, 'letra')} con cabeceras desconocidas o que requieren decisión: "
+                      "usa --export ARCHIVO para verlas.", markup=False)
+    elif compact and changes:
+        console.print("Usa --export ARCHIVO para guardar la lista completa.", markup=False)
     print_elapsed(console)
     if not applied:
         if changes:
-            console.print("Para aplicar los cambios, repite el comando con --apply. Antes se guardará "
+            console.print("Para aplicar, repite el comando con --apply. Antes se guardará "
                           "un respaldo en:", markup=False)
-            print_copyable(console, str(root / "ChoconostleLRCTool_back"))
+            print_copyable(console, str(root / BACKUP_DIR_NAME))
         else:
             console.print("No hay nada que modificar.")
         return
-    if nothing:
+    if totals["entries"] == 0:
         console.print("No había nada que modificar: no se creó ningún respaldo.")
         return
     if summary is not None and summary.stopped:
@@ -772,7 +844,13 @@ def skipped_by_reason(changes: list) -> list[tuple[str, set]]:
 
 
 def print_revert(results: list, folder: Path, console: Console | None = None,
-                 dry_run: bool = False) -> None:
+                 dry_run: bool = False, compact: bool = False, every_item: bool = False,
+                 export: Path | None = None) -> None:
+    """
+    Resultado de revert. Los conflictos y errores se listan siempre completos
+    (también en la vista compacta). `every_item` lista además cada letra
+    (para --export).
+    """
     from choconostle.backup import REVERT_ALREADY, REVERT_CONFLICT, REVERT_ERROR, REVERT_RESTORED
 
     console = console or Console()
@@ -780,6 +858,23 @@ def print_revert(results: list, folder: Path, console: Console | None = None,
     console.print(f"[bold]revert - {title}[/bold]")
     print_copyable(console, f"Respaldo: {folder}")
     counts = Counter(result.status for result in results)
+    restored = "se restaurarían" if dry_run else "restauradas"
+    summary_line = (f"Resumen: {counts[REVERT_RESTORED]} {restored}, {counts[REVERT_ALREADY]} ya estaban como "
+                    f"el original, {counts[REVERT_CONFLICT]} conflictos, {counts[REVERT_ERROR]} errores")
+    if every_item:
+        names = {REVERT_RESTORED: "se restauraría" if dry_run else "restaurada",
+                 REVERT_ALREADY: "ya estaba como el original", REVERT_CONFLICT: "CONFLICTO, no se tocó",
+                 REVERT_ERROR: "ERROR"}
+        _section(console, f"Letras ({len(results)})")
+        for result in results:
+            item = result.item
+            where = item["path"] if item["kind"] == "file" else f"{item['path']} [{item['label']}]"
+            line = f"  {where}: {names.get(result.status, result.status)}"
+            print_copyable(console, line + (f" - {result.message}" if result.message else ""))
+    if compact:
+        _revert_problems(console, results)
+        _revert_final_block(console, summary_line, folder, dry_run, results, export)
+        return
     table = Table(show_header=False, box=None, padding=(0, 2))
     table.add_column(style="bold")
     table.add_column()
@@ -790,10 +885,34 @@ def print_revert(results: list, folder: Path, console: Console | None = None,
     if counts[REVERT_ERROR]:
         table.add_row("Errores", f"[red]{counts[REVERT_ERROR]}[/red]")
     console.print(table)
+    _revert_problems(console, results)
+    _revert_final_block(console, summary_line, folder, dry_run, results, export)
+
+
+def _revert_problems(console: Console, results: list) -> None:
+    from choconostle.backup import REVERT_CONFLICT, REVERT_ERROR
     for result in results:
         if result.status in (REVERT_CONFLICT, REVERT_ERROR):
             item = result.item
             where = item["path"] if item["kind"] == "file" else f"{item['path']} [{item['label']}]"
             style = "yellow" if result.status == REVERT_CONFLICT else "red"
-            console.print(Text(f"  {where}: {result.message}", style=style))
+            print_copyable(console, f"  {where}: {result.message}", style)
+
+
+def _revert_final_block(console: Console, summary_line: str, folder: Path, dry_run: bool, results: list,
+                        export: Path | None) -> None:
+    """Bloque final de revert: resumen, tiempo total, respaldo y siguiente acción."""
+    from choconostle.backup import REVERT_CONFLICT, REVERT_RESTORED
+    console.print()
+    console.print(summary_line, markup=False)
+    if export is not None:
+        console.print("Lista completa guardada en:", markup=False)
+        print_copyable(console, str(export))
     print_elapsed(console)
+    console.print("Respaldo:", markup=False)
+    print_copyable(console, str(folder))
+    if dry_run and any(result.status == REVERT_RESTORED for result in results):
+        console.print("Para revertir, repite el comando sin --dry-run.", markup=False)
+    elif any(result.status == REVERT_CONFLICT for result in results):
+        console.print("Para restaurar también las letras en conflicto, repite el comando con --force.",
+                      markup=False)
