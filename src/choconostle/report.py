@@ -276,6 +276,15 @@ def print_copyable(console: Console, text: str, style: str | None = None) -> Non
     console.print(Text(text, style=style or ""), soft_wrap=True)
 
 
+def print_elapsed(console: Console) -> str | None:
+    """Muestra el tiempo total del comando en curso (si hay reloj) y lo retorna."""
+    from choconostle.utils import elapsed_line
+    line = elapsed_line()
+    if line:
+        console.print(line, markup=False)
+    return line
+
+
 def _section(console: Console, title: str) -> None:
     console.print()
     console.rule(f"[bold]{title}[/bold]", align="left")
@@ -728,6 +737,7 @@ def print_run_report(
     listing("Errores", lambda item: item["status"] == "error", "red")
 
     console.print()
+    print_elapsed(console)
     if not applied:
         if changes:
             console.print("Para aplicar los cambios, repite el comando con --apply. Antes se guardará "
@@ -786,3 +796,4 @@ def print_revert(results: list, folder: Path, console: Console | None = None,
             where = item["path"] if item["kind"] == "file" else f"{item['path']} [{item['label']}]"
             style = "yellow" if result.status == REVERT_CONFLICT else "red"
             console.print(Text(f"  {where}: {result.message}", style=style))
+    print_elapsed(console)

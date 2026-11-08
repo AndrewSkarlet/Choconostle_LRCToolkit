@@ -2,6 +2,10 @@
 
 ## v1.0.0-rc2
 
+### Agregado (commit 2: tiempo total)
+- **Tiempo total** al final del resumen de `normalize-lyrics` y `convert-lyrics` (simulación, `--diff`, `--apply` y `--resume`), `revert` y `fix-gallery`: «Tiempo total: 2,3 s», «2 min 05 s» o «1 h 02 min 05 s». Se mide con `time.perf_counter()` desde el inicio del comando y también se muestra cuando termina con error (código 1, 2, 3 o Ctrl+C), en la salida de errores.
+- Se escribe en `registro.txt` de la carpeta de respaldo con `--apply` (y «(reanudación)» con `--resume`). `revert` lo escribe en su `revert_<fecha>.txt` y añade «(revert del <fecha>)» a `registro.txt`. La simulación y `fix-gallery` no tienen `registro.txt`: solo se muestra en pantalla.
+
 ### Corregido (commit 1: huella del audio en el plan)
 - **Un cambio externo entre planificar y aplicar podía pasar sin detectarse.** Solo se comparaban el tamaño, la fecha de modificación y los bytes de las etiquetas; en Android (Termux) dos escrituras seguidas pueden quedar con la misma `st_mtime_ns`, y un byte de audio cambiado no se notaba (`test_file_changed_between_plan_and_apply` fallaba de forma intermitente en tres teléfonos).
   - El plan de `normalize-lyrics` y `convert-lyrics` guarda ahora una **huella del audio** de cada archivo que se va a modificar: el hash del tamaño, el primer y el último MB de lo que está fuera de la región de etiquetas (en Ogg, del archivo entero), igual que `--verify quick`. Antes de escribir se recalcula sobre exactamente los mismos bytes y, si no coincide, el archivo falla con «el audio cambió desde que se planearon los cambios» y no se toca.

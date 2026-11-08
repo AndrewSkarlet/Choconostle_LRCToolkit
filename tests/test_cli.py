@@ -227,3 +227,41 @@ def test_progress_disabled_does_nothing():
     progress.step("verificando")
     progress.stop()
     assert buffer.getvalue() == ""
+
+
+def test_elapsed_time_in_summaries_and_log(tmp_path):
+    from choconostle.config import BACKUP_DIR_NAME
+    library = _library_with_headers(tmp_path)
+    for args in (["normalize-lyrics", "--strip-headers", "--diff"], ["convert-lyrics", "--eol", "crlf"],
+                 ["fix-gallery"]):
+        result = runner.invoke(app, [args[0], str(library), "--no-progress", *args[1:]])
+        assert result.exit_code == 0, result.output
+        assert "Tiempo total: " in result.output, args
+
+    result = runner.invoke(app, ["normalize-lyrics", str(library), "--strip-headers", "--apply", "--no-progress"])
+    assert result.exit_code == 0, result.output
+    assert "Tiempo total: " in result.output
+    folder = next((library / BACKUP_DIR_NAME).iterdir())
+    assert "Tiempo total: " in (folder / "registro.txt").read_text(encoding="utf-8")
+
+    result = runner.invoke(app, ["revert", str(folder), "--no-progress"])
+    assert result.exit_code == 0, result.output
+    assert "Tiempo total: " in result.output
+    log = (folder / "registro.txt").read_text(encoding="utf-8")
+    assert log.count("Tiempo total: ") == 2 and "(revert del " in log
+    assert "Tiempo total: " in next(folder.glob("revert_*.txt")).read_text(encoding="utf-8")
+
+
+def test_elapsed_time_also_when_ending_with_error(tmp_path):
+    library = _library_with_headers(tmp_path)
+    result = runner.invoke(app, ["normalize-lyrics", str(library), "--strip-headers", "--only", "no-existe",
+                                 "--no-progress"])
+    assert result.exit_code == 2
+    assert result.output.count("Tiempo total: ") == 1
+
+
+def test_format_elapsed():
+    from choconostle.utils import format_elapsed
+    assert format_elapsed(2.34) == "2,3 s"
+    assert format_elapsed(125) == "2 min 05 s"
+    assert format_elapsed(3725) == "1 h 02 min 05 s"

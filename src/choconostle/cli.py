@@ -45,11 +45,11 @@ from choconostle.normalizer import (
 )
 from choconostle.rawtags.writer import VERIFY_AUTO, VERIFY_FULL, VERIFY_QUICK
 from choconostle.report import (
-    build_report, print_copyable, print_report, print_revert, print_run_report, write_json,
+    build_report, print_copyable, print_elapsed, print_report, print_revert, print_run_report, write_json,
 )
 from choconostle.scanner import LibraryScan, count_files, scan_directory
 from choconostle.textio import EncodingOptionError, parse_target_encoding
-from choconostle.utils import format_size, long_path, plural
+from choconostle.utils import elapsed_line, elapsed_shown, format_size, long_path, plural, start_clock, stop_clock
 from rich.table import Column
 from rich.text import Text
 
@@ -106,8 +106,40 @@ def _main(
 ) -> None:
     """Toolkit para analizar, reparar y organizar bibliotecas musicales con archivos LRC."""
     ctx.obj = {"no_banner": no_banner}
+    if ctx.invoked_subcommand in TIMED_COMMANDS:
+        start_clock()
+        ctx.call_on_close(_elapsed_on_close)
     if ctx.invoked_subcommand is None:
         _show_banner_or_help(ctx, no_banner)
+
+
+TIMED_COMMANDS = {"normalize-lyrics", "convert-lyrics", "revert", "clean-backups", "fix-gallery"}
+"""Comandos que muestran el tiempo total al final (medido con time.perf_counter() desde el inicio)."""
+
+
+def _elapsed_on_close() -> None:
+    """Si el comando terminó sin llegar al resumen (error, Ctrl+C), muestra igualmente el tiempo total."""
+    try:
+        if not elapsed_shown():
+            line = elapsed_line()
+            if line:
+                Console(stderr=True, highlight=False).print(line, markup=False)
+    finally:
+        stop_clock()
+
+
+def _log_elapsed(folder: Path, label: str | None = None) -> None:
+    """Añade el tiempo total al registro.txt de una carpeta de respaldo (si la unidad sigue accesible)."""
+    line = elapsed_line(mark_shown=False)
+    if not line:
+        return
+    if label:
+        line = f"{line} ({label})"
+    try:
+        with open(long_path(Path(folder) / runs.LOG_NAME), "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except OSError:
+        pass
 
 
 class GroupBy(str, Enum):
@@ -373,6 +405,8 @@ def _execute(command, processor, path, apply, diff, limit, only, include_hidden,
     finally:
         if not keep_folder:
             shutil.rmtree(execution.folder, ignore_errors=True)
+        else:
+            _log_elapsed(execution.folder)
 
 
 def _option_lines(options: dict) -> list[str]:
@@ -465,17 +499,20 @@ def _resume(path, folder, console, error_console, progress, show_limit, diff,
             style="yellow", markup=False)
     _intents, done = execution.outcome()
     try:
-        progress.start_apply(execution.state["totals"]["entries"], completed=len(done))
-        summary = runs.apply_run(execution, normalizer, path, progress, resume=True,
-                                 verify=options.get("verify", VERIFY_AUTO))
-    except runs.InsufficientSpace as exc:
-        print_copyable(error_console, str(exc), "red")
-        raise typer.Exit(code=2)
+        try:
+            progress.start_apply(execution.state["totals"]["entries"], completed=len(done))
+            summary = runs.apply_run(execution, normalizer, path, progress, resume=True,
+                                     verify=options.get("verify", VERIFY_AUTO))
+        except runs.InsufficientSpace as exc:
+            print_copyable(error_console, str(exc), "red")
+            raise typer.Exit(code=2)
+        finally:
+            progress.stop()
+        _report(execution, console, error_console, path, show_limit, diff, True, summary,
+                _option_lines(options) + ["Reanudada"])
+        _exit_for(summary)
     finally:
-        progress.stop()
-    _report(execution, console, error_console, path, show_limit, diff, True, summary,
-            _option_lines(options) + ["Reanudada"])
-    _exit_for(summary)
+        _log_elapsed(execution.folder, "reanudación")
 
 
 class _RunProgress:
@@ -701,6 +738,8 @@ def revert(
         raise typer.Exit(code=2)
     except backup.RevertStopped as stop:
         print_revert(stop.results, folder, console=console, dry_run=dry_run)
+        if not dry_run:
+            _log_revert_elapsed(folder)
         console.print()
         print_copyable(console, f"SE DETUVO: {stop}", "bold red")
         console.print("Lo restaurado hasta aquí está confirmado. Vuelve a ejecutar revert"
@@ -716,8 +755,26 @@ def revert(
                                       f"({exc}). Vuelve a ejecutar revert cuando la unidad esté conectada.", "red")
         raise typer.Exit(code=3)
     print_revert(results, folder, console=console, dry_run=dry_run)
+    if not dry_run:
+        _log_revert_elapsed(folder)
     if any(result.status in (backup.REVERT_CONFLICT, backup.REVERT_ERROR) for result in results):
         raise typer.Exit(code=1)
+
+
+def _log_revert_elapsed(folder: Path) -> None:
+    """Tiempo total de revert: en el revert_<fecha>.txt recién escrito y en registro.txt."""
+    from datetime import datetime
+    line = elapsed_line(mark_shown=False)
+    if not line:
+        return
+    try:
+        logs = sorted(Path(folder).glob("revert_*.txt"))
+        if logs:
+            with open(long_path(logs[-1]), "a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+    except OSError:
+        pass
+    _log_elapsed(folder, f"revert del {datetime.now().isoformat(timespec='seconds')}")
 
 
 @app.command()
@@ -962,6 +1019,7 @@ def fix_gallery(
                       f"{len(result.created)}, ya existentes {len(result.existing)}, omitidas {result.skipped} "
                       f"(sin {'audio' if all_folders else 'imágenes'} {result.not_matching}, protegidas "
                       f"{len(result.protected)}), con error {len(result.errors)}", markup=False)
+    print_elapsed(console)
     if not apply and (result.removed if remove else result.created):
         console.print("Para aplicarlo, repite el comando con --apply.", markup=False)
     if result.stopped is not None:
