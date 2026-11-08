@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.0.0-rc2
+
+### Corregido (commit 1: huella del audio en el plan)
+- **Un cambio externo entre planificar y aplicar podía pasar sin detectarse.** Solo se comparaban el tamaño, la fecha de modificación y los bytes de las etiquetas; en Android (Termux) dos escrituras seguidas pueden quedar con la misma `st_mtime_ns`, y un byte de audio cambiado no se notaba (`test_file_changed_between_plan_and_apply` fallaba de forma intermitente en tres teléfonos).
+  - El plan de `normalize-lyrics` y `convert-lyrics` guarda ahora una **huella del audio** de cada archivo que se va a modificar: el hash del tamaño, el primer y el último MB de lo que está fuera de la región de etiquetas (en Ogg, del archivo entero), igual que `--verify quick`. Antes de escribir se recalcula sobre exactamente los mismos bytes y, si no coincide, el archivo falla con «el audio cambió desde que se planearon los cambios» y no se toca.
+  - Con `--verify full` el plan guarda además el SHA-256 de todo el audio, que detecta también cambios en el medio.
+  - **Límite:** sin `--verify full`, el hash solo cubre el primer y el último MB; un cambio en el medio de un archivo de más de 2 MB no se detecta (hay una prueba que lo documenta).
+  - Lectura extra por archivo que se va a modificar: 2 MB al planificar; al aplicar, 0 con `auto`/`quick` en su sitio (reutiliza el hash que ya se calculaba) y 2 MB en reescrituras completas y Ogg. Con `full`, además, todo el audio una vez al planificar y 0 al aplicar. Los archivos sin cambios no leen nada más.
+  - `--resume` sobre un plan de la rc1 (sin huella) avisa de que esos archivos usan la protección anterior.
+  - Pruebas nuevas (`tests/test_huella.py`): un byte cambiado tras planificar con la fecha restaurada con `os.utime`, en los dos comandos, con MP3, Ogg y un archivo de menos de 2 MB; un byte en el medio del audio (no se detecta por defecto, sí con `--verify full`); y el aviso de `--resume`. `test_file_changed_between_plan_and_apply` ya no depende de la resolución de mtime.
+
 ## v1.0.0-rc1
 
 Versión candidata (`1.0.0rc1` en `pyproject.toml` y `config.py`).

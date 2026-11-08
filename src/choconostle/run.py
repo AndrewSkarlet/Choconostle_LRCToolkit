@@ -350,6 +350,16 @@ class Run:
             if record.get("type") != "end":
                 yield record
 
+    def legacy_audio_plans(self) -> int:
+        """
+        Archivos de audio por modificar cuyo plan no tiene huella del audio
+        (planes de la rc1): al aplicarlos solo se comparan tamaño, fecha y
+        bytes de las etiquetas.
+        """
+        return sum(1 for record in self.plan_records()
+                   if record.get("status") == "change" and record.get("plan")
+                   and "audio" not in record["plan"])
+
     def plan_complete(self) -> bool:
         last = None
         for last in iter_jsonl(self.folder / PLAN_NAME):
@@ -916,10 +926,11 @@ def _apply_audio(run: Run, root: Path, record: dict, journal: Journal, verify: s
             _progress_call(progress, "step", f"verificando el audio completo: {path.name}")
         if is_ogg:
             result = rewrite_with(path, tuple(plan["signature"]), lambda tmp: OggEditor.modify(tmp, values),
-                                  lambda original, tmp: editor.check(original, tmp, edit.expected))
+                                  lambda original, tmp: editor.check(original, tmp, edit.expected),
+                                  plan.get("audio"))
         else:
             result = write_edit(path, editor, edit, journal, f"edit-{record['id']:06d}",
-                                tuple(plan["signature"]), record["path"], verify)
+                                tuple(plan["signature"]), record["path"], verify, plan.get("audio"))
         _progress_call(progress, "step", "")
         checkpoint("written", record)
     except RestoreError as exc:

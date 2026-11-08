@@ -49,7 +49,7 @@ from choconostle.report import (
 )
 from choconostle.scanner import LibraryScan, count_files, scan_directory
 from choconostle.textio import EncodingOptionError, parse_target_encoding
-from choconostle.utils import format_size, long_path
+from choconostle.utils import format_size, long_path, plural
 from rich.table import Column
 from rich.text import Text
 
@@ -322,6 +322,7 @@ def _execute(command, processor, path, apply, diff, limit, only, include_hidden,
         if apply:
             raise typer.Exit(code=2)
 
+    processor.verify = verify  # con --verify full, el plan guarda el hash de todo el audio
     execution = runs.Run.create(path, command, dict(processor.options(), verify=verify), temporary=not apply)
     keep_folder = apply
     resume_hint = f'choconostle {command} "{path}" --resume "{execution.folder}"'
@@ -455,6 +456,13 @@ def _resume(path, folder, console, error_console, progress, show_limit, diff,
         for problem in problems:
             print_copyable(error_console, f"  - {problem}", "red")
         raise typer.Exit(code=2)
+    legacy = execution.legacy_audio_plans()
+    if legacy:
+        error_console.print(
+            f"Aviso: el plan es de una versión anterior y no guarda la huella del audio de "
+            f"{plural(legacy, 'archivo')}. Para esos archivos se usa la protección anterior: "
+            "solo se comprueba que el tamaño, la fecha de modificación y las etiquetas no hayan cambiado.",
+            style="yellow", markup=False)
     _intents, done = execution.outcome()
     try:
         progress.start_apply(execution.state["totals"]["entries"], completed=len(done))

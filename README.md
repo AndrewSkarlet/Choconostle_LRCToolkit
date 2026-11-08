@@ -232,7 +232,7 @@ Se omiten, con el motivo contado en el resumen: ID3v2.2 (mutagen lo convertiría
 
 Antes y después de cada escritura:
 
-1. Se comprueba que el archivo no cambió desde la planificación: tamaño, fecha de modificación y bytes de las etiquetas.
+1. Se comprueba que el archivo no cambió desde la planificación: tamaño, fecha de modificación, bytes de las etiquetas y huella del audio. La huella se guarda en el plan y es el hash del primer y el último MB de lo que está fuera de la región de etiquetas (en Ogg, del archivo entero); con `--verify full` es además el hash de todo el audio. Sirve aunque la fecha no cambie (en Android dos escrituras seguidas pueden quedar con la misma `st_mtime_ns`). Sin `--verify full`, un cambio en el medio de un archivo de más de 2 MB no se detecta.
 2. Se calcula el hash de todo lo que está fuera de la región de etiquetas (el audio).
 3. Se guarda en el diario (`pendiente/` en el respaldo) la parte que se va a sobrescribir.
 4. Tras escribir se relee el archivo y se comprueba que la región quedó como estaba prevista, que todas las etiquetas que no son letras son idénticas byte a byte y que el hash del audio no cambió. Si algo no coincide, se restaura el original y se informa del error.
@@ -273,6 +273,16 @@ Solo cuentan como aplicados los archivos confirmados en el diario. Si la unidad 
 - `quick`: las etiquetas byte a byte, el tamaño y el primer y el último MB del audio.
 
 En ambos casos la región de etiquetas se relee y se verifica completa.
+
+`--verify` también decide la huella del audio que el plan guarda para detectar cambios entre planificar y aplicar. Lectura extra por archivo que se va a modificar (los que no cambian no leen nada más; un archivo de menos de 2 MB se lee entero una vez):
+
+| | Al planificar | Al aplicar, antes de escribir |
+|---|---|---|
+| `auto` / `quick`, edición en su sitio o al final | 2 MB | 0 (reutiliza el hash de `quick`) |
+| `auto`, reescritura completa (y Ogg) | 2 MB | 2 MB |
+| `full` | 2 MB + todo el audio | 0 (reutiliza el hash de `full`) |
+
+Un plan de la rc1 (sin huella) se puede reanudar con `--resume`: se avisa de que para esos archivos se usa la protección anterior (tamaño, fecha y etiquetas).
 
 Medición con 120 MP3 de 24 MB (2,94 GB), con la caché vaciada antes de cada pasada (`tools/medir_verificacion.py`):
 
