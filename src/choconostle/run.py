@@ -447,12 +447,19 @@ class Run:
 # --------------------------------------------------------------------------
 
 def _base_record(change) -> dict:
-    return {
+    from choconostle.suspicious import profile
+    record = {
         "status": change.status, "label": change.label, "details": list(change.details),
         "warnings": list(change.warnings), "message": change.message, "skip_reason": change.skip_reason,
         "nearly_empty": change.nearly_empty, "unknown": list(change.unknown_headers),
         "instrumental": change.instrumental, "extended": change.extended,
     }
+    if change.original_text:
+        # Avisos de «letras sospechosas» (solo informan): URL, clave del texto y si es muy corta.
+        suspect = profile(change.original_text, change.nearly_empty, change.instrumental)
+        if suspect["url"] or suspect["key"] is not None or suspect["short"]:
+            record["suspect"] = suspect
+    return record
 
 
 def _jsonable(value):
@@ -492,6 +499,7 @@ class RecordBuilder:
                 record.update({
                     "type": "file", "id": entry, "item": item, "path": _rel(change.path, self.root),
                     "track": _rel(change.track_path, self.root) if change.track_path else None,
+                    "title": change.track.title if change.track is not None else None,
                     "headers": [list(pair) for pair in change.headers],
                     "source_encoding": change.source_encoding, "approximate": change.approximate,
                 })
@@ -511,6 +519,7 @@ class RecordBuilder:
                 self.next_id += 1
                 record = {"type": "audio", "id": entry, "path": _rel(change.path, self.root),
                           "track": _rel(change.track_path, self.root) if change.track_path else None,
+                          "title": change.track.title if change.track is not None else None,
                           "status": "unchanged", "plan": None, "slots": []}
                 try:
                     record["size"] = os.stat(long_path(change.path)).st_size

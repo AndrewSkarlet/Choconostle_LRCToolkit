@@ -44,6 +44,12 @@ class LyricsInfo:
     """Pocas líneas con texto (ver NEARLY_EMPTY_MAX_LINES). Se marcan, no se corrigen."""
     instrumental: bool = False
     """Tiene [instrumental:true]: no se cuenta como vacía ni casi vacía."""
+    url: str | None = None
+    """Primera URL o dominio del texto (aviso de «letras sospechosas»)."""
+    text_key: int | None = None
+    """Clave del texto normalizado, para detectar el mismo texto en muchas canciones."""
+    short: bool = False
+    """Muy corta, no parece letra (y no es casi vacía ni instrumental)."""
     error: str | None = None
 
     @property
@@ -70,6 +76,8 @@ class LyricsInfo:
             "content_lines": self.content_lines,
             "nearly_empty": self.nearly_empty,
             "instrumental": self.instrumental,
+            "url": self.url,
+            "short": self.short,
             "needs_fix": self.needs_fix,
             "error": self.error,
         }

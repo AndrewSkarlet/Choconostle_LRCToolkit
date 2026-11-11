@@ -168,6 +168,9 @@ def analyze_text(
             continue
         content_lines += 1
 
+    from choconostle.suspicious import profile
+    nearly_empty = content_lines <= NEARLY_EMPTY_MAX_LINES and not instrumental
+    suspect = profile(text, nearly_empty, instrumental)
     return LyricsInfo(
         source=source,
         location=location,
@@ -180,8 +183,11 @@ def analyze_text(
         is_utf8=encoding in ("utf-8", "ascii"),
         empty=timestamp_lines == 0 and plain_lines == 0 and not instrumental,
         content_lines=content_lines,
-        nearly_empty=content_lines <= NEARLY_EMPTY_MAX_LINES and not instrumental,
+        nearly_empty=nearly_empty,
         instrumental=instrumental,
+        url=suspect["url"],
+        text_key=suspect["key"],
+        short=suspect["short"],
     )
 
 

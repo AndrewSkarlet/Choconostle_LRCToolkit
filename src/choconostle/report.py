@@ -99,7 +99,7 @@ def _album_dict(album: Album, root: Path) -> dict:
     }
 
 
-def build_report(scan: LibraryScan, group_by: str = GROUP_BY_FOLDER) -> dict:
+def build_report(scan: LibraryScan, group_by: str = GROUP_BY_FOLDER, repeat_threshold: int | None = None) -> dict:
     """Construye el reporte completo como un diccionario serializable a JSON."""
     root = scan.root
     tracks = [track for track in scan.tracks if not track.error]
@@ -131,6 +131,8 @@ def build_report(scan: LibraryScan, group_by: str = GROUP_BY_FOLDER) -> dict:
     found: dict[str, Counter] = {"lrc": Counter(), "txt": Counter(), "embedded": Counter()}
     to_fix: list[dict] = []
     nearly_empty: list[dict] = []
+    suspicious_urls: list[dict] = []
+    suspicious_short: list[dict] = []
     header_counts: Counter = Counter()
     issue_counts = Counter()
 
@@ -155,6 +157,15 @@ def build_report(scan: LibraryScan, group_by: str = GROUP_BY_FOLDER) -> dict:
                 "source": lyrics.source,
                 "content_lines": lyrics.content_lines,
             })
+        where = {"track": _rel(track.filepath, root) if track else None,
+                 "title": track.title if track else None,
+                 "location": (_rel(lyrics.location, root) if lyrics.source == SOURCE_EXTERNAL
+                              else lyrics.location),
+                 "source": lyrics.source}
+        if lyrics.url and not lyrics.error:
+            suspicious_urls.append(dict(where, url=lyrics.url))
+        if lyrics.short and not lyrics.error:
+            suspicious_short.append(where)
         if lyrics.needs_fix:
             location = (_rel(lyrics.location, root) if lyrics.source == SOURCE_EXTERNAL
                         else lyrics.location)
@@ -176,6 +187,18 @@ def build_report(scan: LibraryScan, group_by: str = GROUP_BY_FOLDER) -> dict:
             register(lyrics, track)
     for lyrics in scan.orphan_lyrics:
         register(lyrics, None)
+
+    from choconostle.suspicious import REPEAT_THRESHOLD, repeated_groups, song_label
+    threshold = repeat_threshold or REPEAT_THRESHOLD
+
+    def lyric_keys():
+        for track in tracks:
+            song = _rel(track.filepath, root)
+            for lyrics in track.lyrics:
+                yield lyrics.text_key, song, song_label(track.title, song)
+        for lyrics in scan.orphan_lyrics:
+            song = _rel(lyrics.location, root)
+            yield lyrics.text_key, song, song
 
     no_embedded_support = [track for track in tracks if not track.embedded_lyrics_supported]
     no_embedded_by_format = Counter(track.format_label for track in no_embedded_support)
@@ -224,6 +247,12 @@ def build_report(scan: LibraryScan, group_by: str = GROUP_BY_FOLDER) -> dict:
         },
         "lyrics_to_fix": to_fix,
         "lyrics_nearly_empty": nearly_empty,
+        "suspicious_lyrics": {
+            "repeat_threshold": threshold,
+            "urls": suspicious_urls,
+            "repeated": repeated_groups(lyric_keys, threshold),
+            "short": suspicious_short,
+        },
         "no_embedded_lyrics_support": {
             "tracks": len(no_embedded_support),
             "by_format": dict(no_embedded_by_format),
@@ -268,6 +297,52 @@ def _more(console: Console, hidden: int, total: int | None = None, what: str = "
     else:
         console.print(f"  ... y {hidden} más: se muestran {total - hidden} de {total} {what}. "
                       "Usa --limit 0 para ver la lista completa.", style="yellow")
+
+
+def suspicious_count(urls: list, repeated: list, short: list) -> int:
+    return len(urls) + sum(group["count"] for group in repeated) + len(short)
+
+
+def print_suspicious(console: Console, urls: list, repeated: list, short: list, threshold: int,
+                     limit: int = 0) -> None:
+    """
+    Sección «Letras sospechosas» (scan y simulación de normalize-lyrics).
+    Solo informa: nada se modifica. `urls` y `short` son dicts con track,
+    title, location y source; `repeated`, grupos {"count", "songs"}.
+    """
+    total = suspicious_count(urls, repeated, short)
+    if not total:
+        return
+    _section(console, f"Letras sospechosas ({total})")
+    console.print("Solo es un aviso: no se modifica nada. Revísalas a mano.", style="dim")
+
+    def name(item) -> str:
+        from choconostle.suspicious import song_label
+        if item["source"] == SOURCE_EXTERNAL:
+            return item["location"]
+        return f"{song_label(item.get('title'), item.get('track'))} [{item['location']}]"
+    if urls:
+        console.print(Text(f"Con URL o dominio ({len(urls)}):", style="bold"))
+        shown, hidden = _limited(urls, limit)
+        for item in shown:
+            console.print(Text(f"  {name(item)}: {item['url']}"))
+        _more(console, hidden)
+    if repeated:
+        console.print(Text(f"Mismo texto en {threshold} canciones distintas o más ({len(repeated)} "
+                           f"{'grupo' if len(repeated) == 1 else 'grupos'}; pueden ser remixes o versiones "
+                           "como Slowed o Sped Up, o publicidad):", style="bold"))
+        shown, hidden = _limited(repeated, limit)
+        for number, group in enumerate(shown, 1):
+            console.print(Text(f"  Grupo {number}: {plural(group['count'], 'canción', 'canciones')}"))
+            for song in group["songs"]:
+                console.print(Text(f"    {song}"))
+        _more(console, hidden)
+    if short:
+        console.print(Text(f"Muy cortas, no parecen letra ({len(short)}):", style="bold"))
+        shown, hidden = _limited(short, limit)
+        for item in shown:
+            console.print(Text(f"  {name(item)}"))
+        _more(console, hidden)
 
 
 def print_copyable(console: Console, text: str, style: str | None = None) -> None:
@@ -419,6 +494,11 @@ def print_report(report: dict, console: Console | None = None, limit: int = 20) 
             console.print(Text(f"  {name}: {plural(item['content_lines'], 'línea')}"))
         _more(console, hidden)
 
+    suspicious = report.get("suspicious_lyrics")
+    if suspicious:
+        print_suspicious(console, suspicious["urls"], suspicious["repeated"], suspicious["short"],
+                         suspicious["repeat_threshold"], limit)
+
     # Álbumes ----------------------------------------------------------
     albums = report["albums"]
     group_label = "por etiqueta" if report["group_by"] == GROUP_BY_TAG else "por carpeta"
@@ -550,6 +630,7 @@ def print_run_report(
     options: list[str] | None = None,
     compact: bool = False,
     export: Path | None = None,
+    repeat_threshold: int | None = None,
 ) -> None:
     """
     Reporte de normalize-lyrics o convert-lyrics leído desde el plan y el
@@ -613,6 +694,11 @@ def print_run_report(
     changes = statuses.get("change", 0)
     if compact:
         _compact_failures(console, run, done if applied else {})
+        if command == "normalize-lyrics" and not applied:
+            count = suspicious_count(*run_suspicious(run, repeat_threshold))
+            if count:
+                console.print(f"{plural(count, 'letra sospechosa', 'letras sospechosas')} (URL, texto repetido "
+                              "o muy cortas): usa --export ARCHIVO para verlas.", markup=False)
         _run_final_block(console, run, root, command, totals, statuses, applied, summary,
                          applied_count, failed_count, compact, export)
         return
@@ -760,9 +846,46 @@ def print_run_report(
         console.print(table)
     listing("Omitidas", lambda item: item["status"] == "skipped", "dim")
     listing("Errores", lambda item: item["status"] == "error", "red")
+    if command == "normalize-lyrics" and not applied:
+        urls, repeated, short = run_suspicious(run, repeat_threshold)
+        from choconostle.suspicious import REPEAT_THRESHOLD
+        print_suspicious(console, urls, repeated, short, repeat_threshold or REPEAT_THRESHOLD, limit)
 
     _run_final_block(console, run, root, command, totals, statuses, applied, summary,
                      applied_count, failed_count, compact, export)
+
+
+def run_suspicious(run, repeat_threshold: int | None = None) -> tuple[list, list, list]:
+    """Letras sospechosas leídas del plan en disco (URL, texto repetido, muy cortas)."""
+    from choconostle.suspicious import REPEAT_THRESHOLD, repeated_groups, song_label
+    threshold = repeat_threshold or REPEAT_THRESHOLD
+    urls, short = [], []
+
+    def lyric_items(record):
+        if record["type"] == "file":
+            yield record, record["path"]
+        else:
+            for slot in record["slots"]:
+                yield slot, slot["label"]
+
+    for record in run.plan_records():
+        for item, location in lyric_items(record):
+            suspect = item.get("suspect") or {}
+            where = {"track": record.get("track") or (record["path"] if record["type"] == "audio" else None),
+                     "title": record.get("title"), "location": location,
+                     "source": SOURCE_EXTERNAL if record["type"] == "file" else "embedded"}
+            if suspect.get("url"):
+                urls.append(dict(where, url=suspect["url"]))
+            if suspect.get("short"):
+                short.append(where)
+
+    def keys():
+        for record in run.plan_records():
+            song = record.get("track") or record["path"]
+            label = song_label(record.get("title"), song)
+            for item, _location in lyric_items(record):
+                yield (item.get("suspect") or {}).get("key"), song, label
+    return urls, repeated_groups(keys, threshold), short
 
 
 def _compact_failures(console: Console, run, done) -> None:

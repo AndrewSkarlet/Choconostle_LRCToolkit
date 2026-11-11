@@ -2,6 +2,14 @@
 
 ## Sin publicar
 
+### Agregado (commit 3: letras sospechosas)
+- Sección **«Letras sospechosas»** en `scan` (pantalla y `suspicious_lyrics` en el JSON) y en la simulación de `normalize-lyrics` (pantalla y `--export`; en la vista compacta, solo el número y la sugerencia de `--export`). Solo informa: nunca se modifica nada.
+  - **Con URL o dominio:** `http://`, `https://`, `www.` y dominios con terminaciones poco ambiguas (`.com`, `.net`, `.org`, `.info`, `.xyz`, `.top`, `.site`, `.online`, `.club`, `.biz`, `.lyrics`, `.ru`, `.cn`). `.es`, `.me` o `.co` sin `www.` no cuentan, porque darían falsos positivos («mira.Es la vida»).
+  - **Mismo texto en muchas canciones distintas:** se compara sin marcas de tiempo, cabeceras, secciones, mayúsculas ni espacios. Umbral `--repeat-threshold N` en `scan` y `normalize-lyrics` (por defecto 5). Cada grupo muestra el título y la ruta de cada canción, para distinguir remixes y versiones (Slowed, Sped Up) de publicidad.
+  - **Muy cortas, no parecen letra:** menos de 40 letras en total. No repite las «casi vacías» (que tienen su sección) ni las instrumentales: cada letra sale en una sola de las dos secciones.
+- Memoria: la clave de cada texto es un entero; el texto repetido se cuenta en dos pasadas (la primera con un contador por texto; la segunda guarda títulos solo de los grupos que llegan al umbral). Medido con la biblioteca de casos ×1 y ×20: la simulación crece unos 83 bytes por letra; `tests/test_memoria.py` (que mide `--apply`) pasa sin crecimiento medible.
+- Pruebas nuevas en `tests/test_sospechosas.py` con casos generados.
+
 ### Cambiado (commit 2: interfaz)
 - **Todas las barras con el mismo formato:** indicador animado, nombre del paso, N/M y tiempo transcurrido, p. ej. `⠋ Aplicando 1234/4468 · 0:12:40`. Se quitó el tiempo restante (y la barra gráfica). Igual en `scan` (ahora cuenta los archivos antes y muestra «Escaneando N/M»), planificación, aplicación, comprobación de `--resume`, `revert`, `clean-backups` y `fix-gallery`, en las dos vistas. En la vista completa se añade el nombre del archivo en curso, recortado con «…» al ancho de la terminal; en la compacta, no. En las verificaciones largas el paso pasa a «Verificando audio».
 - **`--export`** muestra «Guardando la lista en …» mientras escribe (solo en una terminal).

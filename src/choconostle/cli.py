@@ -166,6 +166,8 @@ class View:
     command: str = ""
     library: Path | None = None
     """Biblioteca (la ruta propuesta para guardar la lista nunca está dentro)."""
+    repeat_threshold: int | None = None
+    """normalize-lyrics: umbral de «texto repetido» en las letras sospechosas."""
 
 
 def _terminal_width() -> int | None:
@@ -365,6 +367,11 @@ def scan(
         False, "--no-progress",
         help="No muestra el progreso del escaneo.",
     ),
+    repeat_threshold: int = typer.Option(
+        5, "--repeat-threshold", min=2,
+        help="Letras sospechosas: avisa si el mismo texto aparece en este número de canciones distintas "
+             "o más (por defecto 5).",
+    ),
 ) -> None:
     """Escanea una biblioteca y muestra el reporte de formatos, letras, álbumes y portadas."""
     _safe_streams()
@@ -377,7 +384,7 @@ def scan(
         raise typer.Exit(code=2)
 
     result = _scan(path, include_hidden, no_progress, error_console)
-    report = build_report(result, group_by=group_by.value)
+    report = build_report(result, group_by=group_by.value, repeat_threshold=repeat_threshold)
     print_report(report, console=console, limit=limit)
 
     if json_path is not None:
@@ -454,6 +461,11 @@ def normalize_lyrics(
              "escribe, full si se reescribe el archivo), full (hash de todo el audio, antes y después) "
              "o quick (etiquetas byte a byte, tamaño y el primer y último MB del audio).",
     ),
+    repeat_threshold: int = typer.Option(
+        5, "--repeat-threshold", min=2,
+        help="Letras sospechosas: avisa si el mismo texto aparece en este número de canciones distintas "
+             "o más (por defecto 5).",
+    ),
     compact: bool = typer.Option(False, "--compact", help=COMPACT_HELP),
     full: bool = typer.Option(False, "--full", help=FULL_HELP),
     export: Optional[Path] = typer.Option(None, "--export", help=EXPORT_HELP),
@@ -470,6 +482,7 @@ def normalize_lyrics(
         raise typer.Exit(code=2)
     show_limit = limit  # None: el reporte decide (20; todo con --diff; resumen con --apply y más de 50)
     view = _view(compact, full, export, error_console, no_input, "normalize-lyrics", path)
+    view.repeat_threshold = repeat_threshold
     progress = _RunProgress(error_console, enabled=not no_progress and error_console.is_terminal,
                             compact=view.compact)
 
@@ -591,11 +604,12 @@ def _report(execution, console, error_console, path, limit, diff, applied, summa
 
     def render(file_console: Console) -> None:
         print_run_report(execution, console=file_console, limit=0, show_diff=True, applied=applied,
-                         summary=summary, options=options)
+                         summary=summary, options=options, repeat_threshold=view.repeat_threshold)
     try:
         exported = _export(view, error_console, render)
         print_run_report(execution, console=console, limit=limit, show_diff=diff, applied=applied,
-                         summary=summary, options=options, compact=view.compact, export=exported)
+                         summary=summary, options=options, compact=view.compact, export=exported,
+                         repeat_threshold=view.repeat_threshold)
         if not applied:
             _offer_export(view, console, error_console, render)
     except OSError:
