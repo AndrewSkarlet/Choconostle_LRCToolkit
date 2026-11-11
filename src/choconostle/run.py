@@ -651,10 +651,11 @@ def plan_library(run: Run, normalizer, root: Path, only: list[str] | None = None
         resolved = path.resolve()
         return any(resolved == folder or folder in resolved.parents for folder in folders)
 
-    def on_file(_path):
+    def on_file(path):
         totals.files_seen += 1
         if progress is not None:
             progress.advance(totals)
+            _progress_call(progress, "current", path)
 
     with open(long_path(run.folder / PLAN_NAME), "a", encoding="utf-8") as plan_file:
         for folder_scan in iter_folders(root, include_hidden, on_file, folders=walk):
@@ -752,6 +753,7 @@ def apply_run(run: Run, normalizer, root: Path, progress=None, resume: bool = Fa
             if not reachable(root):
                 raise StopRun("device", "La biblioteca o su carpeta de respaldo ya no están accesibles "
                                         "(¿se desconectó la tarjeta SD?).")
+            _progress_call(progress, "current", record["path"])
             if record["type"] == "file":
                 status, error = _apply_file(run, normalizer, root, record)
             else:
@@ -930,7 +932,7 @@ def _apply_audio(run: Run, root: Path, record: dict, journal: Journal, verify: s
         _diary(run, root, intent)
         checkpoint("intent", record)
         if is_ogg or verify == VERIFY_FULL:
-            _progress_call(progress, "step", f"verificando el audio completo: {path.name}")
+            _progress_call(progress, "step", "Verificando audio", path.name)
         if is_ogg:
             result = rewrite_with(path, tuple(plan["signature"]), lambda tmp: OggEditor.modify(tmp, values),
                                   lambda original, tmp: editor.check(original, tmp, edit.expected),

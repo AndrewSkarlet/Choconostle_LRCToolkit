@@ -211,7 +211,7 @@ def test_progress_shows_only_file_name():
     progress = cli._RunProgress(console, enabled=True)
     progress.start("Revirtiendo", 1)
     progress.tick(0, "Artista\\Álbum/01 canción.lrc")
-    assert progress.progress.tasks[0].fields["stats"] == "01 canción.lrc"
+    assert progress.progress.tasks[0].fields["name"] == "01 canción.lrc"
     progress.stop()
 
 
@@ -411,7 +411,7 @@ def test_compact_progress_is_one_short_line(width):
     progress = cli._RunProgress(console, enabled=True, compact=True)
     progress.start_apply(340)
     progress.tick(12, "03_cabeceras/" + "nombre muy largo " * 8 + ".lrc")
-    progress.step("verificando el audio completo: x.flac")
+    progress.step("Verificando audio", "x.flac")
     progress.progress.refresh()
     progress.stop()
     frames = [re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", frame).rstrip("\r\n")
@@ -420,7 +420,7 @@ def test_compact_progress_is_one_short_line(width):
     assert frames
     for frame in frames:
         assert "\n" not in frame and len(frame) <= 40, repr(frame)
-        assert "/340" in frame and "restante" in frame and "muy largo" not in frame
+        assert "/340 · 0:00:0" in frame and "restante" not in frame and "muy largo" not in frame and "x.flac" not in frame
 
 
 def test_compact_progress_respects_no_progress_and_redirection(tmp_path):
@@ -437,4 +437,4 @@ def test_compact_progress_respects_no_progress_and_redirection(tmp_path):
     # Salida redirigida (no es una terminal): el comando no anima el progreso aunque no haya --no-progress.
     library = _library_with_headers(tmp_path)
     result = runner.invoke(app, ["normalize-lyrics", str(library), "--strip-headers", "--compact"])
-    assert result.exit_code == 0 and "restante" not in result.output
+    assert result.exit_code == 0 and "Planificando" not in result.output

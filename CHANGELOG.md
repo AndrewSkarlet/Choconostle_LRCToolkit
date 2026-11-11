@@ -2,6 +2,12 @@
 
 ## Sin publicar
 
+### Cambiado (commit 2: interfaz)
+- **Todas las barras con el mismo formato:** indicador animado, nombre del paso, N/M y tiempo transcurrido, p. ej. `⠋ Aplicando 1234/4468 · 0:12:40`. Se quitó el tiempo restante (y la barra gráfica). Igual en `scan` (ahora cuenta los archivos antes y muestra «Escaneando N/M»), planificación, aplicación, comprobación de `--resume`, `revert`, `clean-backups` y `fix-gallery`, en las dos vistas. En la vista completa se añade el nombre del archivo en curso, recortado con «…» al ancho de la terminal; en la compacta, no. En las verificaciones largas el paso pasa a «Verificando audio».
+- **`--export`** muestra «Guardando la lista en …» mientras escribe (solo en una terminal).
+- **«¿Guardar la lista completa? (s/N)»** al terminar una simulación o `--diff` de `normalize-lyrics`, `convert-lyrics`, `revert --dry-run`, `clean-backups` y `fix-gallery`, solo si la entrada y la salida son una terminal interactiva y no se usó `--export`. Si la respuesta es sí, pide la ruta con un valor por defecto: en Termux `~/storage/shared/Download` si existe; si no, la carpeta personal (`choconostle_<comando>_<fecha-hora>.txt`). Nunca propone la carpeta actual ni una ruta dentro de la biblioteca o del repositorio (en ese caso, la carpeta temporal del sistema). Sin terminal no pregunta nada. **`--no-input`** desactiva la pregunta.
+- Pruebas nuevas en `tests/test_interfaz.py`; las de la barra en `tests/test_cli.py` se adaptaron al formato nuevo.
+
 ### Cambiado (commit 1: lo que salía como «desconocido»)
 En la biblioteca real (6690 letras) salieron 287 letras con «desconocidos» de tres tipos. Ahora se clasifican:
 - **Etiquetas de sección estilo Genius** (`[Intro: Pitbull & Lil Jon]`, `[Chorus]`, `[Verse 1]`, `[Pre-Chorus]`...): en inglés Intro, Verse, Pre-Chorus, Chorus, Post-Chorus, Bridge, Outro, Hook, Refrain, Interlude, Breakdown y Drop; en español Intro, Verso, Precoro (o Pre-coro), Coro, Estribillo, Puente, Outro e Interludio; con o sin número y con o sin «: artista», sin distinguir mayúsculas. Son letra: no se listan como desconocidas y nunca se quitan, tampoco con `--strip-unknown-headers` ni en SYLT. Como son letra, terminan el bloque inicial. No cuentan como «línea con texto» para «casi vacía».

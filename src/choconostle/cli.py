@@ -27,17 +27,16 @@ import os
 import shutil
 import stat
 import sys
+from contextlib import nullcontext
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import List, Optional
 
 import typer
 from rich.console import Console
-from rich.progress import (
-    BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn,
-    TimeRemainingColumn,
-)
+from rich.progress import MofNCompleteColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 from choconostle.config import APP_CODENAME, APP_DESCRIPTION, APP_NAME, APP_VERSION, BACKUP_DIR_NAME
 from choconostle import backup
@@ -154,6 +153,7 @@ COMPACT_HELP = (f"Vista compacta para terminales estrechas: progreso en una lín
 FULL_HELP = "Vista completa aunque la terminal sea estrecha (o haya CHOCONOSTLE_COMPACT=1)."
 EXPORT_HELP = ("Guarda la lista completa (archivos, cabeceras y diferencias) en este archivo de texto. "
                "También en la simulación.")
+NO_INPUT_HELP = "No pregunta nada al terminar (p. ej. si se quiere guardar la lista completa)."
 
 
 @dataclass
@@ -161,6 +161,11 @@ class View:
     """Vista elegida para un comando: compacta o completa, y archivo de --export."""
     compact: bool = False
     export: Path | None = None
+    no_input: bool = False
+    """--no-input: no preguntar si se guarda la lista al terminar una simulación."""
+    command: str = ""
+    library: Path | None = None
+    """Biblioteca (la ruta propuesta para guardar la lista nunca está dentro)."""
 
 
 def _terminal_width() -> int | None:
@@ -192,7 +197,8 @@ def choose_compact(compact: bool, full: bool) -> bool:
     return width is not None and width < COMPACT_WIDTH
 
 
-def _view(compact: bool, full: bool, export: Path | None, error_console: Console) -> View:
+def _view(compact: bool, full: bool, export: Path | None, error_console: Console, no_input: bool = False,
+          command: str = "", library: Path | None = None) -> View:
     try:
         chosen = choose_compact(compact, full)
     except ValueError as exc:
@@ -203,20 +209,92 @@ def _view(compact: bool, full: bool, export: Path | None, error_console: Console
         if export.is_dir() or not export.parent.is_dir():
             print_copyable(error_console, f"--export: no se puede crear el archivo {export}", "red")
             raise typer.Exit(code=2)
-    return View(chosen, export)
+    return View(chosen, export, no_input, command, library)
 
 
 def _export(view: View, error_console: Console, render) -> Path | None:
     """Escribe la vista completa sin límites con render(console) en el archivo de --export."""
     if view.export is None:
         return None
+    # Indicador mientras se escribe (con miles de letras y --diff puede tardar).
+    indicator = (error_console.status(f"Guardando la lista en {view.export}...")
+                 if error_console.is_terminal else nullcontext())
     try:
-        with open(long_path(view.export), "w", encoding="utf-8") as handle:
+        with indicator, open(long_path(view.export), "w", encoding="utf-8") as handle:
             render(Console(file=handle, width=120, color_system=None, highlight=False, emoji=False))
     except OSError as exc:
         print_copyable(error_console, f"No se pudo guardar --export {view.export}: {exc}", "red")
         return None
     return view.export
+
+
+def _interactive_io() -> bool:
+    """True si la entrada y la salida son una terminal interactiva (se puede preguntar)."""
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def _is_termux() -> bool:
+    return bool(os.environ.get("TERMUX_VERSION")) or "com.termux" in os.environ.get("PREFIX", "")
+
+
+def _repo_root() -> Path | None:
+    """Carpeta del repositorio si el programa se ejecuta desde una copia de desarrollo."""
+    candidate = Path(__file__).resolve().parents[2]
+    return candidate if (candidate / "pyproject.toml").is_file() else None
+
+
+def _inside(path: Path, folder: Path) -> bool:
+    try:
+        path, folder = Path(path).resolve(), Path(folder).resolve()
+    except OSError:
+        return False
+    return path == folder or folder in path.parents
+
+
+def default_export_path(command: str, library: Path | None = None, home: Path | None = None,
+                        termux: bool | None = None, now: datetime | None = None) -> Path:
+    """
+    Ruta propuesta al preguntar si se guarda la lista: en Termux,
+    ~/storage/shared/Download si existe; si no, la carpeta personal. Nunca la
+    carpeta actual ni dentro de la biblioteca o del repositorio (en ese caso,
+    la carpeta temporal del sistema).
+    """
+    import tempfile
+    home = Path(home) if home is not None else Path.home()
+    termux = _is_termux() if termux is None else termux
+    folder = home
+    shared = home / "storage" / "shared" / "Download"
+    if termux and shared.is_dir():
+        folder = shared
+    if any(_inside(folder, other) for other in (library, _repo_root()) if other is not None):
+        folder = Path(tempfile.gettempdir())
+    stamp = (now or datetime.now()).strftime("%Y-%m-%d_%H-%M-%S")
+    return folder / f"choconostle_{command or 'lista'}_{stamp}.txt"
+
+
+def _offer_export(view: View, console: Console, error_console: Console, render) -> None:
+    """
+    Al terminar una simulación: si la entrada y la salida son una terminal, no
+    se usó --export ni --no-input, pregunta si se guarda la lista completa.
+    """
+    if view.no_input or view.export is not None or not _interactive_io():
+        return
+    console.print()
+    answer = typer.prompt("¿Guardar la lista completa? (s/N)", default="n", show_default=False)
+    if answer.strip().lower() not in ("s", "si", "sí", "y", "yes"):
+        return
+    default = default_export_path(view.command, view.library)
+    target = Path(typer.prompt("Ruta del archivo", default=str(default))).expanduser()
+    if target.is_dir() or not target.parent.is_dir():
+        print_copyable(error_console, f"No se puede crear el archivo {target}", "red")
+        return
+    saved = _export(View(export=target), error_console, render)
+    if saved is not None:
+        console.print("Lista completa guardada en:", markup=False)
+        print_copyable(console, str(saved))
 
 
 class GroupBy(str, Enum):
@@ -252,21 +330,16 @@ def _scan(path: Path, include_hidden: bool, no_progress: bool, error_console: Co
     """Escanea mostrando el progreso si la salida es una terminal."""
     if no_progress or not error_console.is_terminal:
         return scan_directory(path, include_hidden=include_hidden)
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("{task.description}"),
-        console=error_console,
-        transient=True,
-    ) as progress:
-        task = progress.add_task("Escaneando...", total=None)
-        count = 0
-
-        def on_file(file: Path) -> None:
-            nonlocal count
-            count += 1
-            progress.update(task, description=f"Escaneando... {count} archivos  {file.name}")
-
-        return scan_directory(path, include_hidden=include_hidden, on_file=on_file)
+    compact = choose_compact(False, False)
+    progress = _RunProgress(error_console, enabled=True, compact=compact)
+    progress.start("Contando archivos", None)
+    total = count_files(path, include_hidden)
+    progress.start("Escaneando", total)
+    try:
+        return scan_directory(path, include_hidden=include_hidden,
+                              on_file=lambda file: progress.tick(1, file.name))
+    finally:
+        progress.stop()
 
 
 @app.command()
@@ -384,6 +457,7 @@ def normalize_lyrics(
     compact: bool = typer.Option(False, "--compact", help=COMPACT_HELP),
     full: bool = typer.Option(False, "--full", help=FULL_HELP),
     export: Optional[Path] = typer.Option(None, "--export", help=EXPORT_HELP),
+    no_input: bool = typer.Option(False, "--no-input", help=NO_INPUT_HELP),
 ) -> None:
     """Quita o estandariza las cabeceras de las letras (archivos y etiquetas incrustadas)."""
     _safe_streams()
@@ -395,7 +469,7 @@ def normalize_lyrics(
         print_copyable(error_console, f"No es una carpeta: {path}", "red")
         raise typer.Exit(code=2)
     show_limit = limit  # None: el reporte decide (20; todo con --diff; resumen con --apply y más de 50)
-    view = _view(compact, full, export, error_console)
+    view = _view(compact, full, export, error_console, no_input, "normalize-lyrics", path)
     progress = _RunProgress(error_console, enabled=not no_progress and error_console.is_terminal,
                             compact=view.compact)
 
@@ -514,12 +588,16 @@ def _report(execution, console, error_console, path, limit, diff, applied, summa
     desconectada), se muestra solo lo que se sabe en memoria.
     """
     view = view or View()
+
+    def render(file_console: Console) -> None:
+        print_run_report(execution, console=file_console, limit=0, show_diff=True, applied=applied,
+                         summary=summary, options=options)
     try:
-        exported = _export(view, error_console, lambda file_console: print_run_report(
-            execution, console=file_console, limit=0, show_diff=True, applied=applied, summary=summary,
-            options=options))
+        exported = _export(view, error_console, render)
         print_run_report(execution, console=console, limit=limit, show_diff=diff, applied=applied,
                          summary=summary, options=options, compact=view.compact, export=exported)
+        if not applied:
+            _offer_export(view, console, error_console, render)
     except OSError:
         if summary is None or not summary.stopped:
             raise
@@ -603,8 +681,30 @@ def _resume(path, folder, console, error_console, progress, show_limit, diff,
         _log_elapsed(execution.folder, "reanudación")
 
 
+def _bar(console: Console, compact: bool) -> Progress:
+    """
+    Formato común de todas las barras: indicador animado, nombre del paso,
+    N/M y tiempo transcurrido («Aplicando 1234/4468 · 0:12:40»). En la vista
+    completa se añade el nombre del archivo en curso, recortado con «…» al
+    ancho de la terminal; en la compacta, no.
+    """
+    columns = [SpinnerColumn(), TextColumn("{task.description}"), MofNCompleteColumn(), TextColumn("·"),
+               TimeElapsedColumn()]
+    if not compact:
+        # expand=True: cada actualización ocupa el ancho completo (rellena con
+        # espacios), así no quedan restos de un nombre anterior más largo en las
+        # consolas que no borran la línea antes de redibujarla.
+        columns.append(TextColumn("{task.fields[name]}",
+                                  table_column=Column(ratio=1, no_wrap=True, overflow="ellipsis")))
+    return Progress(*columns, console=console, transient=True, expand=not compact)
+
+
+def _file_name(current: str) -> str:
+    return current.replace("\\", "/").rsplit("/", 1)[-1] if current else ""
+
+
 class _RunProgress:
-    """Progreso en la terminal: archivos, cambios, errores, tiempo y tiempo restante estimado."""
+    """Progreso en la terminal: paso, N/M, tiempo transcurrido y (vista completa) el archivo en curso."""
 
     def __init__(self, console: Console, enabled: bool, compact: bool = False):
         self.enabled = enabled
@@ -612,66 +712,49 @@ class _RunProgress:
         self.console = console
         self.progress = None
         self.task = None
+        self._description = ""
 
     def _start(self, description: str, total: int | None, completed: int = 0) -> None:
         self.stop()
+        self._description = description
         if not self.enabled:
             return
-        if self.compact:
-            # Una sola línea corta: indicador animado, N/M y tiempo restante.
-            self.progress = Progress(
-                SpinnerColumn(), MofNCompleteColumn(), TextColumn("archivos · restante"), TimeRemainingColumn(),
-                console=self.console, transient=True,
-            )
-            self.progress.start()
-            self.task = self.progress.add_task(description, total=total, completed=completed, stats="")
-            return
-        # expand=True: cada actualización ocupa el ancho completo de la terminal
-        # (rellena con espacios) y el texto variable se recorta con «…». Así no
-        # quedan restos de un nombre anterior más largo en las consolas que no
-        # borran la línea antes de redibujarla.
-        self.progress = Progress(
-            SpinnerColumn(), TextColumn("{task.description}"),
-            BarColumn(bar_width=None, table_column=Column(ratio=1)), MofNCompleteColumn(),
-            TextColumn("{task.fields[stats]}", table_column=Column(ratio=2, no_wrap=True, overflow="ellipsis")),
-            TimeElapsedColumn(), TextColumn("restante (estimado)"), TimeRemainingColumn(),
-            console=self.console, transient=True, expand=True,
-        )
+        self.progress = _bar(self.console, self.compact)
         self.progress.start()
-        self.task = self.progress.add_task(description, total=total, completed=completed, stats="")
+        self.task = self.progress.add_task(description, total=total, completed=completed, name="")
 
     def start_plan(self, total: int) -> None:
         self._start("Planificando", total)
 
     # Interfaz genérica (revert, comprobación de --resume, clean-backups).
     def start(self, description: str, total: int | None, completed: int = 0) -> None:
-        self._description = description
         self._start(description, total, completed)
 
     def tick(self, count: int = 1, current: str = "") -> None:
         if self.progress is not None:
-            # Solo el nombre del archivo: si no cabe, se recorta por el final con «…».
-            name = current.replace("\\", "/").rsplit("/", 1)[-1] if current else ""
-            self.progress.update(self.task, advance=count, stats=name)
+            self.progress.update(self.task, advance=count, name=_file_name(current))
 
-    def step(self, text: str) -> None:
-        """Paso en curso dentro del archivo actual (p. ej. una verificación larga)."""
+    def current(self, path) -> None:
+        """Archivo en curso (solo se muestra en la vista completa)."""
         if self.progress is not None:
-            self.progress.update(self.task, stats=text)
+            self.progress.update(self.task, name=_file_name(str(path)))
+
+    def step(self, text: str = "", current: str = "") -> None:
+        """Paso largo dentro del archivo actual («Verificando audio»); sin texto, vuelve al paso normal."""
+        if self.progress is not None:
+            self.progress.update(self.task, description=text or self._description,
+                                 name=_file_name(current) if current else "")
 
     def start_apply(self, total: int, completed: int = 0) -> None:
         self._start("Aplicando", total, completed)
 
     def advance(self, totals) -> None:
         if self.progress is not None:
-            stats = (f"cambios {totals.statuses.get('change', 0)}  "
-                     f"errores {totals.statuses.get('error', 0)}")
-            self.progress.update(self.task, completed=totals.files_seen, stats=stats)
+            self.progress.update(self.task, completed=totals.files_seen)
 
-    def applied(self, summary) -> None:
+    def applied(self, _summary) -> None:
         if self.progress is not None:
-            self.progress.update(self.task, advance=1,
-                                 stats=f"aplicados {summary.applied}  errores {summary.failed}")
+            self.progress.update(self.task, advance=1)
 
     def stop(self) -> None:
         if self.progress is not None:
@@ -765,6 +848,7 @@ def convert_lyrics(
     compact: bool = typer.Option(False, "--compact", help=COMPACT_HELP),
     full: bool = typer.Option(False, "--full", help=FULL_HELP),
     export: Optional[Path] = typer.Option(None, "--export", help=EXPORT_HELP),
+    no_input: bool = typer.Option(False, "--no-input", help=NO_INPUT_HELP),
 ) -> None:
     """Convierte codificación, saltos de línea y caracteres de las letras (con simulación y respaldo)."""
     from choconostle.converter import LyricsConverter
@@ -777,7 +861,7 @@ def convert_lyrics(
     if not path.is_dir():
         print_copyable(error_console, f"No es una carpeta: {path}", "red")
         raise typer.Exit(code=2)
-    view = _view(compact, full, export, error_console)
+    view = _view(compact, full, export, error_console, no_input, "convert-lyrics", path)
     progress = _RunProgress(error_console, enabled=not no_progress and error_console.is_terminal,
                             compact=view.compact)
     if resume is not None:
@@ -824,19 +908,24 @@ def revert(
     compact: bool = typer.Option(False, "--compact", help=COMPACT_HELP),
     full: bool = typer.Option(False, "--full", help=FULL_HELP),
     export: Optional[Path] = typer.Option(None, "--export", help=EXPORT_HELP),
+    no_input: bool = typer.Option(False, "--no-input", help=NO_INPUT_HELP),
 ) -> None:
     """Restaura las letras originales desde una carpeta de respaldo (normalize-lyrics o convert-lyrics)."""
     _safe_streams()
     console = Console(highlight=False)
     error_console = Console(stderr=True, highlight=False)
-    view = _view(compact, full, export, error_console)
+    view = _view(compact, full, export, error_console, no_input, "revert")
     progress = _RunProgress(error_console, enabled=not no_progress and error_console.is_terminal,
                             compact=view.compact)
 
     def show(results) -> None:
-        exported = _export(view, error_console, lambda file_console: print_revert(
-            results, folder, console=file_console, dry_run=dry_run, every_item=True))
+        def render(file_console: Console) -> None:
+            print_revert(results, folder, console=file_console, dry_run=dry_run, every_item=True)
+        exported = _export(view, error_console, render)
         print_revert(results, folder, console=console, dry_run=dry_run, compact=view.compact, export=exported)
+        if dry_run:
+            view.library = folder.parent.parent if folder.parent.name == BACKUP_DIR_NAME else folder
+            _offer_export(view, console, error_console, render)
 
     try:
         folder = backup.resolve_backup(folder.expanduser(), latest=latest)
@@ -931,6 +1020,7 @@ def clean_backups(
     compact: bool = typer.Option(False, "--compact", help=COMPACT_HELP),
     full: bool = typer.Option(False, "--full", help=FULL_HELP),
     export: Optional[Path] = typer.Option(None, "--export", help=EXPORT_HELP),
+    no_input: bool = typer.Option(False, "--no-input", help=NO_INPUT_HELP),
 ) -> None:
     """Borra respaldos antiguos de ChoconostleLRCTool_back (nunca los incompletos o reanudables)."""
     _safe_streams()
@@ -938,7 +1028,7 @@ def clean_backups(
     path = path.expanduser()
     stopped = None
     error_console = Console(stderr=True, highlight=False)
-    view = _view(compact, full, export, error_console)
+    view = _view(compact, full, export, error_console, no_input, "clean-backups", path)
     progress = _RunProgress(error_console, enabled=not no_progress and error_console.is_terminal,
                             compact=view.compact)
     try:
@@ -952,9 +1042,12 @@ def clean_backups(
         print_copyable(console, f"No se pueden revisar los respaldos: la unidad no está accesible ({exc}). "
                                 f"Vuelve a ejecutar clean-backups cuando esté conectada.", "red")
         raise typer.Exit(code=3)
-    exported = _export(view, error_console, lambda file_console: _print_clean(
-        file_console, path, older_than, apply, remove, keep, stopped, compact=False))
+    def render(file_console: Console) -> None:
+        _print_clean(file_console, path, older_than, apply, remove, keep, stopped, compact=False)
+    exported = _export(view, error_console, render)
     _print_clean(console, path, older_than, apply, remove, keep, stopped, view.compact, exported)
+    if not apply and stopped is None:
+        _offer_export(view, console, error_console, render)
     if stopped is not None:
         raise typer.Exit(code=3)
     if any(apply and not info.deleted for info in remove):
@@ -1009,7 +1102,7 @@ def _print_clean(console: Console, path: Path, older_than: int, apply: bool, rem
 
 
 class _GalleryProgress:
-    """Progreso de fix-gallery: carpetas encontradas y luego «N de M»."""
+    """Progreso de fix-gallery con el formato común: carpetas encontradas y luego «N/M»."""
 
     def __init__(self, console: Console, enabled: bool, compact: bool = False):
         self.enabled = enabled
@@ -1018,29 +1111,23 @@ class _GalleryProgress:
         self.progress = None
         self.task = None
 
-    def _open(self, *columns, description: str, total) -> None:
+    def _open(self, description: str, total) -> None:
         self.stop()
         if not self.enabled:
             return
-        self.progress = Progress(*columns, console=self.console, transient=True)
+        self.progress = _bar(self.console, self.compact)
         self.progress.start()
-        self.task = self.progress.add_task(description, total=total)
+        self.task = self.progress.add_task(description, total=total, name="")
 
     def searching(self) -> None:
-        self._open(SpinnerColumn(), TextColumn("{task.description}"), description="Buscando carpetas...",
-                   total=None)
+        self._open("Buscando carpetas", None)
 
     def found(self, count: int) -> None:
         if self.progress is not None:
-            self.progress.update(self.task, description=f"Buscando carpetas... {count}")
+            self.progress.update(self.task, completed=count)
 
     def start(self, description: str, total: int) -> None:
-        if self.compact:
-            self._open(SpinnerColumn(), MofNCompleteColumn(), TextColumn("carpetas · restante"),
-                       TimeRemainingColumn(), description=description, total=total)
-            return
-        self._open(SpinnerColumn(), TextColumn("{task.description}"), BarColumn(), MofNCompleteColumn(),
-                   TimeElapsedColumn(), description=description, total=total)
+        self._open(description, total)
 
     def advance(self, count: int) -> None:
         if self.progress is not None:
@@ -1093,6 +1180,7 @@ def fix_gallery(
     compact: bool = typer.Option(False, "--compact", help=COMPACT_HELP),
     full: bool = typer.Option(False, "--full", help=FULL_HELP),
     export: Optional[Path] = typer.Option(None, "--export", help=EXPORT_HELP),
+    no_input: bool = typer.Option(False, "--no-input", help=NO_INPUT_HELP),
 ) -> None:
     """Crea .nomedia en las carpetas de álbum para que las galerías no muestren las portadas."""
     from choconostle import gallery
@@ -1116,7 +1204,7 @@ def fix_gallery(
         error_console.print("--remove no se combina con --all-folders ni con --include-root.", style="red",
                             markup=False)
         raise typer.Exit(code=2)
-    view = _view(compact, full, export, error_console)
+    view = _view(compact, full, export, error_console, no_input, "fix-gallery", path)
     progress = _GalleryProgress(error_console, enabled=not no_progress and error_console.is_terminal,
                                 compact=view.compact)
     if remove:
@@ -1131,9 +1219,12 @@ def fix_gallery(
         raise typer.Exit(code=2)
 
     options = dict(apply=apply, remove=remove, all_folders=all_folders, include_root=include_root, only=only)
-    exported = _export(view, error_console, lambda file_console: _print_gallery(
-        file_console, gallery, path, result, options, limit=0))
+    def render(file_console: Console) -> None:
+        _print_gallery(file_console, gallery, path, result, options, limit=0)
+    exported = _export(view, error_console, render)
     _print_gallery(console, gallery, path, result, options, limit, view.compact, exported)
+    if not apply and result.stopped is None:
+        _offer_export(view, console, error_console, render)
     if result.stopped is not None:
         raise typer.Exit(code=3)
     if result.errors:
