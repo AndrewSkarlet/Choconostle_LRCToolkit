@@ -9,7 +9,7 @@ Autor: AndrewSkarlet
 
 APP_NAME = "Choconostle_LRCToolkit"
 APP_CODENAME = "Xoconostle"
-APP_VERSION = "1.0.0rc1"
+APP_VERSION = "1.0.0rc2"
 APP_AUTHOR = "AndrewSkarlet"
 APP_LICENSE = "MIT"
 

@@ -1,6 +1,6 @@
 # Pendientes
 
-Lo que no se hizo o no se probó en la versión 1.0.0rc1. Las decisiones ya tomadas y lo que está hecho se describen en `README.md` y `CHANGELOG.md`.
+Lo que no se hizo o no se probó en la versión 1.0.0rc2. Las decisiones ya tomadas y lo que está hecho se describen en `README.md` y `CHANGELOG.md`.
 
 ## No probado
 
@@ -21,6 +21,7 @@ Lo que no se hizo o no se probó en la versión 1.0.0rc1. Las decisiones ya toma
 - **`tests/test_memoria.py`:**
   - en Windows tarda entre 45 y 57 s, y se pidieron unos 30 s;
   - en una ejecución de la suite completa en Linux falló («el pico creció 5140 bytes por entrada»), aunque sola pasa 3 de 3. La causa no se ha determinado.
+- **Huella del audio sin `--verify full`:** el hash que se guarda en el plan solo cubre el primer y el último MB del audio. Un cambio externo en el medio de un archivo de más de 2 MB, con el mismo tamaño y la misma fecha de modificación, no se detecta antes de escribir (con `--verify full`, sí).
 - **Memoria:** `revert` crece unos 420 bytes por archivo y `scan` unos 1,3 KB por archivo (ver `docs/RENDIMIENTO.md`).
 
 ## Fuera del rc1

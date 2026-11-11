@@ -40,7 +40,7 @@ from choconostle.normalizer import (
     distinct_labels, plan_file_edit,
 )
 from choconostle.rawtags import Unsupported
-from choconostle.rawtags.writer import file_signature
+from choconostle.rawtags.writer import VERIFY_AUTO, file_signature
 from choconostle.textio import (
     EOL_KEEP, EOL_LF, LyricsDecodeError, UnencodableError, apply_replacements, convert_eol, decode_lyrics,
     describe_rule, encode_text, encoding_label, eol_summary, find_mojibake, parse_target_encoding,
@@ -96,6 +96,8 @@ class LyricsConverter:
         self.id3_encoding = id3_encoding
         self.on_unencodable = on_unencodable
         self.allow_full_rewrite = allow_full_rewrite
+        # Verificación prevista (--verify): con full, el plan guarda el hash de todo el audio.
+        self.verify = VERIFY_AUTO
 
     # -- opciones (estado.json, --resume) ---------------------------------
 
@@ -107,9 +109,11 @@ class LyricsConverter:
 
     @classmethod
     def from_options(cls, options: dict) -> "LyricsConverter":
-        return cls(options["to"], options["eol"], options["source_encoding"], options["prefer_encoding"],
-                   options["replacements"], options["id3_encoding"], options["on_unencodable"],
-                   options["allow_full_rewrite"])
+        processor = cls(options["to"], options["eol"], options["source_encoding"], options["prefer_encoding"],
+                        options["replacements"], options["id3_encoding"], options["on_unencodable"],
+                        options["allow_full_rewrite"])
+        processor.verify = options.get("verify", VERIFY_AUTO)
+        return processor
 
     @property
     def touches_embedded(self) -> bool:
@@ -264,7 +268,7 @@ class LyricsConverter:
             self._plan_slot(change, slot, version)
             changes.append(change)
         plan_file_edit(editor, signature, [c for c in changes if c.status == STATUS_CHANGE],
-                       self.allow_full_rewrite)
+                       self.allow_full_rewrite, self.verify)
         return changes
 
     def _plan_slot(self, change: LyricsChange, slot: Slot, id3_version) -> None:

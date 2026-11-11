@@ -35,6 +35,45 @@ def format_duration(seconds: float | None) -> str:
     return f"{minutes}:{secs:02d}"
 
 
+def format_elapsed(seconds: float) -> str:
+    """Tiempo total de un comando: 2.34 -> "2,3 s"; 125 -> "2 min 05 s"; 3725 -> "1 h 02 min 05 s"."""
+    if seconds < 60:
+        return f"{seconds:.1f} s".replace(".", ",")
+    total = int(round(seconds))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours} h {minutes:02d} min {secs:02d} s"
+    return f"{minutes} min {secs:02d} s"
+
+
+# Reloj del comando en curso (cli.py lo inicia al empezar cada comando con resumen).
+_CLOCK: dict = {"start": None, "shown": False}
+
+
+def start_clock() -> None:
+    import time
+    _CLOCK.update(start=time.perf_counter(), shown=False)
+
+
+def stop_clock() -> None:
+    _CLOCK.update(start=None, shown=False)
+
+
+def elapsed_line(mark_shown: bool = True) -> str | None:
+    """"Tiempo total: ..." desde start_clock(), o None si no hay reloj en marcha."""
+    import time
+    if _CLOCK["start"] is None:
+        return None
+    if mark_shown:
+        _CLOCK["shown"] = True
+    return f"Tiempo total: {format_elapsed(time.perf_counter() - _CLOCK['start'])}"
+
+
+def elapsed_shown() -> bool:
+    return bool(_CLOCK["shown"])
+
+
 def format_sample_rate(rate: int | None) -> str:
     """44100 -> "44.1 kHz"."""
     if not rate:

@@ -12,6 +12,8 @@ Uso:
     choconostle recover CARPETA_DE_RESPALDO
     choconostle clean-backups RUTA --older-than DÍAS [--apply]
     choconostle fix-gallery RUTA [--all-folders] [--include-root] [--remove] [--apply]
+    (normalize-lyrics, convert-lyrics, revert, clean-backups y fix-gallery aceptan
+     --compact, --full y --export ARCHIVO)
     choconostle version
     choconostle [welcome] [--no-banner]
 
@@ -25,6 +27,7 @@ import os
 import shutil
 import stat
 import sys
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import List, Optional
@@ -36,7 +39,7 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
-from choconostle.config import APP_CODENAME, APP_DESCRIPTION, APP_NAME, APP_VERSION
+from choconostle.config import APP_CODENAME, APP_DESCRIPTION, APP_NAME, APP_VERSION, BACKUP_DIR_NAME
 from choconostle import backup
 from choconostle import run as runs
 from choconostle.normalizer import (
@@ -45,11 +48,11 @@ from choconostle.normalizer import (
 )
 from choconostle.rawtags.writer import VERIFY_AUTO, VERIFY_FULL, VERIFY_QUICK
 from choconostle.report import (
-    build_report, print_copyable, print_report, print_revert, print_run_report, write_json,
+    build_report, print_copyable, print_elapsed, print_report, print_revert, print_run_report, write_json,
 )
 from choconostle.scanner import LibraryScan, count_files, scan_directory
 from choconostle.textio import EncodingOptionError, parse_target_encoding
-from choconostle.utils import format_size, long_path
+from choconostle.utils import elapsed_line, elapsed_shown, format_size, long_path, plural, start_clock, stop_clock
 from rich.table import Column
 from rich.text import Text
 
@@ -106,8 +109,114 @@ def _main(
 ) -> None:
     """Toolkit para analizar, reparar y organizar bibliotecas musicales con archivos LRC."""
     ctx.obj = {"no_banner": no_banner}
+    if ctx.invoked_subcommand in TIMED_COMMANDS:
+        start_clock()
+        ctx.call_on_close(_elapsed_on_close)
     if ctx.invoked_subcommand is None:
         _show_banner_or_help(ctx, no_banner)
+
+
+TIMED_COMMANDS = {"normalize-lyrics", "convert-lyrics", "revert", "clean-backups", "fix-gallery"}
+"""Comandos que muestran el tiempo total al final (medido con time.perf_counter() desde el inicio)."""
+
+
+def _elapsed_on_close() -> None:
+    """Si el comando terminó sin llegar al resumen (error, Ctrl+C), muestra igualmente el tiempo total."""
+    try:
+        if not elapsed_shown():
+            line = elapsed_line()
+            if line:
+                Console(stderr=True, highlight=False).print(line, markup=False)
+    finally:
+        stop_clock()
+
+
+def _log_elapsed(folder: Path, label: str | None = None) -> None:
+    """Añade el tiempo total al registro.txt de una carpeta de respaldo (si la unidad sigue accesible)."""
+    line = elapsed_line(mark_shown=False)
+    if not line:
+        return
+    if label:
+        line = f"{line} ({label})"
+    try:
+        with open(long_path(Path(folder) / runs.LOG_NAME), "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except OSError:
+        pass
+
+
+COMPACT_ENV = "CHOCONOSTLE_COMPACT"
+COMPACT_WIDTH = 70
+"""Con menos columnas que esto, la vista compacta se activa sola."""
+COMPACT_HELP = (f"Vista compacta para terminales estrechas: progreso en una línea y solo el resumen, los errores "
+                f"y el bloque final. Se activa sola con menos de {COMPACT_WIDTH} columnas o con "
+                f"{COMPACT_ENV}=1.")
+FULL_HELP = "Vista completa aunque la terminal sea estrecha (o haya CHOCONOSTLE_COMPACT=1)."
+EXPORT_HELP = ("Guarda la lista completa (archivos, cabeceras y diferencias) en este archivo de texto. "
+               "También en la simulación.")
+
+
+@dataclass
+class View:
+    """Vista elegida para un comando: compacta o completa, y archivo de --export."""
+    compact: bool = False
+    export: Path | None = None
+
+
+def _terminal_width() -> int | None:
+    """Columnas de la terminal, o None si no se pueden leer (la salida no es una terminal...)."""
+    value = os.environ.get("COLUMNS", "")
+    if value.isdigit() and int(value) > 0:
+        return int(value)
+    try:
+        columns = os.get_terminal_size(sys.stdout.fileno()).columns
+    except (OSError, ValueError, AttributeError):
+        return None
+    return columns or None
+
+
+def choose_compact(compact: bool, full: bool) -> bool:
+    """
+    --compact o --full mandan; si no, CHOCONOSTLE_COMPACT=1 (o 0); si no, la
+    vista compacta se activa con menos de COMPACT_WIDTH columnas. Si el ancho
+    no se puede leer, vista completa.
+    """
+    if compact and full:
+        raise ValueError("--compact y --full no se pueden usar juntas.")
+    if compact or full:
+        return compact
+    env = os.environ.get(COMPACT_ENV, "").strip()
+    if env in ("1", "0"):
+        return env == "1"
+    width = _terminal_width()
+    return width is not None and width < COMPACT_WIDTH
+
+
+def _view(compact: bool, full: bool, export: Path | None, error_console: Console) -> View:
+    try:
+        chosen = choose_compact(compact, full)
+    except ValueError as exc:
+        error_console.print(str(exc), style="red", markup=False)
+        raise typer.Exit(code=2)
+    if export is not None:
+        export = export.expanduser()
+        if export.is_dir() or not export.parent.is_dir():
+            print_copyable(error_console, f"--export: no se puede crear el archivo {export}", "red")
+            raise typer.Exit(code=2)
+    return View(chosen, export)
+
+
+def _export(view: View, error_console: Console, render) -> Path | None:
+    """Escribe la vista completa sin límites con render(console) en el archivo de --export."""
+    if view.export is None:
+        return None
+    try:
+        with open(long_path(view.export), "w", encoding="utf-8") as handle:
+            render(Console(file=handle, width=120, color_system=None, highlight=False, emoji=False))
+    except OSError as exc:
+        print_copyable(error_console, f"No se pudo guardar --export {view.export}: {exc}", "red")
+        return None
+    return view.export
 
 
 class GroupBy(str, Enum):
@@ -272,6 +381,9 @@ def normalize_lyrics(
              "escribe, full si se reescribe el archivo), full (hash de todo el audio, antes y después) "
              "o quick (etiquetas byte a byte, tamaño y el primer y último MB del audio).",
     ),
+    compact: bool = typer.Option(False, "--compact", help=COMPACT_HELP),
+    full: bool = typer.Option(False, "--full", help=FULL_HELP),
+    export: Optional[Path] = typer.Option(None, "--export", help=EXPORT_HELP),
 ) -> None:
     """Quita o estandariza las cabeceras de las letras (archivos y etiquetas incrustadas)."""
     _safe_streams()
@@ -283,10 +395,12 @@ def normalize_lyrics(
         print_copyable(error_console, f"No es una carpeta: {path}", "red")
         raise typer.Exit(code=2)
     show_limit = limit  # None: el reporte decide (20; todo con --diff; resumen con --apply y más de 50)
-    progress = _RunProgress(error_console, enabled=not no_progress and error_console.is_terminal)
+    view = _view(compact, full, export, error_console)
+    progress = _RunProgress(error_console, enabled=not no_progress and error_console.is_terminal,
+                            compact=view.compact)
 
     if resume is not None:
-        _resume(path, resume.expanduser(), console, error_console, progress, show_limit, diff)
+        _resume(path, resume.expanduser(), console, error_console, progress, show_limit, diff, view=view)
         return
 
     if strip_headers == standardize_headers:
@@ -305,11 +419,11 @@ def normalize_lyrics(
         allow_full_rewrite=allow_full_rewrite,
     )
     _execute("normalize-lyrics", normalizer, path, apply, diff, show_limit, only or [], include_hidden,
-             verify.value, console, error_console, progress)
+             verify.value, console, error_console, progress, view)
 
 
 def _execute(command, processor, path, apply, diff, limit, only, include_hidden, verify,
-             console, error_console, progress) -> None:
+             console, error_console, progress, view: View | None = None) -> None:
     """
     Ejecución en dos pasadas común a normalize-lyrics y convert-lyrics:
     planificación en disco, aplicación con diario y respaldo, y reporte.
@@ -322,6 +436,7 @@ def _execute(command, processor, path, apply, diff, limit, only, include_hidden,
         if apply:
             raise typer.Exit(code=2)
 
+    processor.verify = verify  # con --verify full, el plan guarda el hash de todo el audio
     execution = runs.Run.create(path, command, dict(processor.options(), verify=verify), temporary=not apply)
     keep_folder = apply
     resume_hint = f'choconostle {command} "{path}" --resume "{execution.folder}"'
@@ -367,11 +482,14 @@ def _execute(command, processor, path, apply, diff, limit, only, include_hidden,
             finally:
                 progress.stop()
         _report(execution, console, error_console, path, limit, diff, apply,
-                summary or (runs.ApplySummary() if apply else None), _option_lines(execution.state["options"]))
+                summary or (runs.ApplySummary() if apply else None), _option_lines(execution.state["options"]),
+                view)
         _exit_for(summary)
     finally:
         if not keep_folder:
             shutil.rmtree(execution.folder, ignore_errors=True)
+        else:
+            _log_elapsed(execution.folder)
 
 
 def _option_lines(options: dict) -> list[str]:
@@ -389,14 +507,19 @@ def _option_lines(options: dict) -> list[str]:
     return lines
 
 
-def _report(execution, console, error_console, path, limit, diff, applied, summary, options) -> None:
+def _report(execution, console, error_console, path, limit, diff, applied, summary, options,
+            view: View | None = None) -> None:
     """
     Reporte leído del plan en disco. Si la unidad ya no está (tarjeta SD
     desconectada), se muestra solo lo que se sabe en memoria.
     """
+    view = view or View()
     try:
+        exported = _export(view, error_console, lambda file_console: print_run_report(
+            execution, console=file_console, limit=0, show_diff=True, applied=applied, summary=summary,
+            options=options))
         print_run_report(execution, console=console, limit=limit, show_diff=diff, applied=applied,
-                         summary=summary, options=options)
+                         summary=summary, options=options, compact=view.compact, export=exported)
     except OSError:
         if summary is None or not summary.stopped:
             raise
@@ -430,7 +553,7 @@ def _exit_for(summary) -> None:
 
 
 def _resume(path, folder, console, error_console, progress, show_limit, diff,
-            command: str = "normalize-lyrics") -> None:
+            command: str = "normalize-lyrics", view: View | None = None) -> None:
     try:
         execution = runs.Run(folder)
     except (FileNotFoundError, ValueError) as exc:
@@ -455,26 +578,37 @@ def _resume(path, folder, console, error_console, progress, show_limit, diff,
         for problem in problems:
             print_copyable(error_console, f"  - {problem}", "red")
         raise typer.Exit(code=2)
+    legacy = execution.legacy_audio_plans()
+    if legacy:
+        error_console.print(
+            f"Aviso: el plan es de una versión anterior y no guarda la huella del audio de "
+            f"{plural(legacy, 'archivo')}. Para esos archivos se usa la protección anterior: "
+            "solo se comprueba que el tamaño, la fecha de modificación y las etiquetas no hayan cambiado.",
+            style="yellow", markup=False)
     _intents, done = execution.outcome()
     try:
-        progress.start_apply(execution.state["totals"]["entries"], completed=len(done))
-        summary = runs.apply_run(execution, normalizer, path, progress, resume=True,
-                                 verify=options.get("verify", VERIFY_AUTO))
-    except runs.InsufficientSpace as exc:
-        print_copyable(error_console, str(exc), "red")
-        raise typer.Exit(code=2)
+        try:
+            progress.start_apply(execution.state["totals"]["entries"], completed=len(done))
+            summary = runs.apply_run(execution, normalizer, path, progress, resume=True,
+                                     verify=options.get("verify", VERIFY_AUTO))
+        except runs.InsufficientSpace as exc:
+            print_copyable(error_console, str(exc), "red")
+            raise typer.Exit(code=2)
+        finally:
+            progress.stop()
+        _report(execution, console, error_console, path, show_limit, diff, True, summary,
+                _option_lines(options) + ["Reanudada"], view)
+        _exit_for(summary)
     finally:
-        progress.stop()
-    _report(execution, console, error_console, path, show_limit, diff, True, summary,
-            _option_lines(options) + ["Reanudada"])
-    _exit_for(summary)
+        _log_elapsed(execution.folder, "reanudación")
 
 
 class _RunProgress:
     """Progreso en la terminal: archivos, cambios, errores, tiempo y tiempo restante estimado."""
 
-    def __init__(self, console: Console, enabled: bool):
+    def __init__(self, console: Console, enabled: bool, compact: bool = False):
         self.enabled = enabled
+        self.compact = compact
         self.console = console
         self.progress = None
         self.task = None
@@ -482,6 +616,15 @@ class _RunProgress:
     def _start(self, description: str, total: int | None, completed: int = 0) -> None:
         self.stop()
         if not self.enabled:
+            return
+        if self.compact:
+            # Una sola línea corta: indicador animado, N/M y tiempo restante.
+            self.progress = Progress(
+                SpinnerColumn(), MofNCompleteColumn(), TextColumn("archivos · restante"), TimeRemainingColumn(),
+                console=self.console, transient=True,
+            )
+            self.progress.start()
+            self.task = self.progress.add_task(description, total=total, completed=completed, stats="")
             return
         # expand=True: cada actualización ocupa el ancho completo de la terminal
         # (rellena con espacios) y el texto variable se recorta con «…». Así no
@@ -619,6 +762,9 @@ def convert_lyrics(
         Verify.auto, "--verify",
         help="Verificación tras escribir en archivos de audio: auto (por defecto), full o quick.",
     ),
+    compact: bool = typer.Option(False, "--compact", help=COMPACT_HELP),
+    full: bool = typer.Option(False, "--full", help=FULL_HELP),
+    export: Optional[Path] = typer.Option(None, "--export", help=EXPORT_HELP),
 ) -> None:
     """Convierte codificación, saltos de línea y caracteres de las letras (con simulación y respaldo)."""
     from choconostle.converter import LyricsConverter
@@ -631,9 +777,11 @@ def convert_lyrics(
     if not path.is_dir():
         print_copyable(error_console, f"No es una carpeta: {path}", "red")
         raise typer.Exit(code=2)
-    progress = _RunProgress(error_console, enabled=not no_progress and error_console.is_terminal)
+    view = _view(compact, full, export, error_console)
+    progress = _RunProgress(error_console, enabled=not no_progress and error_console.is_terminal,
+                            compact=view.compact)
     if resume is not None:
-        _resume(path, resume.expanduser(), console, error_console, progress, limit, diff, "convert-lyrics")
+        _resume(path, resume.expanduser(), console, error_console, progress, limit, diff, "convert-lyrics", view)
         return
 
     try:
@@ -655,7 +803,7 @@ def convert_lyrics(
         id3_encoding.value if id3_encoding else None, on_unencodable.value, allow_full_rewrite,
     )
     _execute("convert-lyrics", converter, path, apply, diff, limit, only or [], include_hidden,
-             verify.value, console, error_console, progress)
+             verify.value, console, error_console, progress, view)
 
 
 @app.command()
@@ -673,12 +821,23 @@ def revert(
     ),
     dry_run: bool = typer.Option(False, "--dry-run", help="Solo muestra qué se restauraría."),
     no_progress: bool = typer.Option(False, "--no-progress", help="No muestra el progreso."),
+    compact: bool = typer.Option(False, "--compact", help=COMPACT_HELP),
+    full: bool = typer.Option(False, "--full", help=FULL_HELP),
+    export: Optional[Path] = typer.Option(None, "--export", help=EXPORT_HELP),
 ) -> None:
     """Restaura las letras originales desde una carpeta de respaldo (normalize-lyrics o convert-lyrics)."""
     _safe_streams()
     console = Console(highlight=False)
     error_console = Console(stderr=True, highlight=False)
-    progress = _RunProgress(error_console, enabled=not no_progress and error_console.is_terminal)
+    view = _view(compact, full, export, error_console)
+    progress = _RunProgress(error_console, enabled=not no_progress and error_console.is_terminal,
+                            compact=view.compact)
+
+    def show(results) -> None:
+        exported = _export(view, error_console, lambda file_console: print_revert(
+            results, folder, console=file_console, dry_run=dry_run, every_item=True))
+        print_revert(results, folder, console=console, dry_run=dry_run, compact=view.compact, export=exported)
+
     try:
         folder = backup.resolve_backup(folder.expanduser(), latest=latest)
         if latest:
@@ -692,7 +851,9 @@ def revert(
         print_copyable(error_console, str(exc), "red")
         raise typer.Exit(code=2)
     except backup.RevertStopped as stop:
-        print_revert(stop.results, folder, console=console, dry_run=dry_run)
+        show(stop.results)
+        if not dry_run:
+            _log_revert_elapsed(folder)
         console.print()
         print_copyable(console, f"SE DETUVO: {stop}", "bold red")
         console.print("Lo restaurado hasta aquí está confirmado. Vuelve a ejecutar revert"
@@ -707,9 +868,27 @@ def revert(
         print_copyable(error_console, f"No se puede revertir: la biblioteca o el respaldo no están accesibles "
                                       f"({exc}). Vuelve a ejecutar revert cuando la unidad esté conectada.", "red")
         raise typer.Exit(code=3)
-    print_revert(results, folder, console=console, dry_run=dry_run)
+    show(results)
+    if not dry_run:
+        _log_revert_elapsed(folder)
     if any(result.status in (backup.REVERT_CONFLICT, backup.REVERT_ERROR) for result in results):
         raise typer.Exit(code=1)
+
+
+def _log_revert_elapsed(folder: Path) -> None:
+    """Tiempo total de revert: en el revert_<fecha>.txt recién escrito y en registro.txt."""
+    from datetime import datetime
+    line = elapsed_line(mark_shown=False)
+    if not line:
+        return
+    try:
+        logs = sorted(Path(folder).glob("revert_*.txt"))
+        if logs:
+            with open(long_path(logs[-1]), "a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+    except OSError:
+        pass
+    _log_elapsed(folder, f"revert del {datetime.now().isoformat(timespec='seconds')}")
 
 
 @app.command()
@@ -749,6 +928,9 @@ def clean_backups(
         help="Borra los respaldos. Sin esta opción solo se muestra qué se borraría.",
     ),
     no_progress: bool = typer.Option(False, "--no-progress", help="No muestra el progreso."),
+    compact: bool = typer.Option(False, "--compact", help=COMPACT_HELP),
+    full: bool = typer.Option(False, "--full", help=FULL_HELP),
+    export: Optional[Path] = typer.Option(None, "--export", help=EXPORT_HELP),
 ) -> None:
     """Borra respaldos antiguos de ChoconostleLRCTool_back (nunca los incompletos o reanudables)."""
     _safe_streams()
@@ -756,7 +938,9 @@ def clean_backups(
     path = path.expanduser()
     stopped = None
     error_console = Console(stderr=True, highlight=False)
-    progress = _RunProgress(error_console, enabled=not no_progress and error_console.is_terminal)
+    view = _view(compact, full, export, error_console)
+    progress = _RunProgress(error_console, enabled=not no_progress and error_console.is_terminal,
+                            compact=view.compact)
     try:
         try:
             remove, keep = runs.clean_backups(path, older_than, apply=apply, progress=progress)
@@ -768,29 +952,53 @@ def clean_backups(
         print_copyable(console, f"No se pueden revisar los respaldos: la unidad no está accesible ({exc}). "
                                 f"Vuelve a ejecutar clean-backups cuando esté conectada.", "red")
         raise typer.Exit(code=3)
+    exported = _export(view, error_console, lambda file_console: _print_clean(
+        file_console, path, older_than, apply, remove, keep, stopped, compact=False))
+    _print_clean(console, path, older_than, apply, remove, keep, stopped, view.compact, exported)
+    if stopped is not None:
+        raise typer.Exit(code=3)
+    if any(apply and not info.deleted for info in remove):
+        raise typer.Exit(code=1)
+
+
+def _print_clean(console: Console, path: Path, older_than: int, apply: bool, remove, keep, stopped,
+                 compact: bool = False, exported: Path | None = None) -> None:
+    """Resultado de clean-backups. Lo que no se pudo borrar se lista siempre completo."""
+    base = path / BACKUP_DIR_NAME
     title = "BORRADOS" if apply else "SIMULACIÓN (no se borró nada)"
     console.print(f"[bold]clean-backups - {title}[/bold]")
-    print_copyable(console, f"Respaldos de más de {older_than} días en {path / 'ChoconostleLRCTool_back'}")
-    console.print()
+    print_copyable(console, f"Respaldos de más de {older_than} días en {base}")
     label = "Borrados" if apply else "Se borrarían"
     deleted = [info for info in remove if info.deleted] if apply else remove
-    console.print(f"{label} ({len(deleted)}, {format_size(sum(i.size for i in deleted))}):", markup=False)
-    for info in deleted:
-        when = info.created.strftime("%Y-%m-%d %H:%M") if info.created else "?"
-        console.print(Text(f"  {info.folder.name}  {when}  {format_size(info.size)}  ({info.state})"))
     failed = [info for info in remove if apply and not info.deleted]
+    if not compact:
+        console.print()
+        console.print(f"{label} ({len(deleted)}, {format_size(sum(i.size for i in deleted))}):", markup=False)
+        for info in deleted:
+            when = info.created.strftime("%Y-%m-%d %H:%M") if info.created else "?"
+            console.print(Text(f"  {info.folder.name}  {when}  {format_size(info.size)}  ({info.state})"))
     if failed:
         console.print(f"No se pudieron borrar ({len(failed)}; se reintentará en la próxima ejecución):",
                       markup=False)
         for info in failed:
             print_copyable(console, f"  {info.folder.name}: {info.error or 'no se llegó a intentar'}", "red")
-    console.print(f"Se conservan ({len(keep)}):", markup=False)
-    for info in keep:
-        console.print(Text(f"  {info.folder.name}  {info.state}: {info.keep_reason}",
-                           style="yellow" if "reanudable" in (info.keep_reason or "")
-                           or "interrumpidas" in (info.keep_reason or "") else ""))
+    if not compact:
+        console.print(f"Se conservan ({len(keep)}):", markup=False)
+        for info in keep:
+            console.print(Text(f"  {info.folder.name}  {info.state}: {info.keep_reason}",
+                               style="yellow" if "reanudable" in (info.keep_reason or "")
+                               or "interrumpidas" in (info.keep_reason or "") else ""))
+    # Bloque final (las dos vistas): resumen, tiempo total, respaldos y siguiente acción.
+    console.print()
+    console.print(f"Resumen: {label.lower()} {len(deleted)} ({format_size(sum(i.size for i in deleted))}), "
+                  f"se conservan {len(keep)}, no se pudieron borrar {len(failed)}", markup=False)
+    if exported is not None:
+        console.print("Lista completa guardada en:", markup=False)
+        print_copyable(console, str(exported))
+    print_elapsed(console)
+    console.print("Respaldos en:", markup=False)
+    print_copyable(console, str(base))
     if remove and not apply:
-        console.print()
         console.print("Para borrarlos, repite el comando con --apply.", markup=False)
     if stopped is not None:
         console.print()
@@ -798,16 +1006,14 @@ def clean_backups(
         console.print("Vuelve a ejecutar cuando la unidad esté conectada; terminará los borrados a medias:",
                       markup=False)
         print_copyable(console, f'choconostle clean-backups "{path}" --older-than {older_than} --apply')
-        raise typer.Exit(code=3)
-    if failed:
-        raise typer.Exit(code=1)
 
 
 class _GalleryProgress:
     """Progreso de fix-gallery: carpetas encontradas y luego «N de M»."""
 
-    def __init__(self, console: Console, enabled: bool):
+    def __init__(self, console: Console, enabled: bool, compact: bool = False):
         self.enabled = enabled
+        self.compact = compact
         self.console = console
         self.progress = None
         self.task = None
@@ -829,6 +1035,10 @@ class _GalleryProgress:
             self.progress.update(self.task, description=f"Buscando carpetas... {count}")
 
     def start(self, description: str, total: int) -> None:
+        if self.compact:
+            self._open(SpinnerColumn(), MofNCompleteColumn(), TextColumn("carpetas · restante"),
+                       TimeRemainingColumn(), description=description, total=total)
+            return
         self._open(SpinnerColumn(), TextColumn("{task.description}"), BarColumn(), MofNCompleteColumn(),
                    TimeElapsedColumn(), description=description, total=total)
 
@@ -880,6 +1090,9 @@ def fix_gallery(
         False, "--include-hidden", help="Incluye carpetas ocultas (que empiezan con '.').",
     ),
     no_progress: bool = typer.Option(False, "--no-progress", help="No muestra el progreso."),
+    compact: bool = typer.Option(False, "--compact", help=COMPACT_HELP),
+    full: bool = typer.Option(False, "--full", help=FULL_HELP),
+    export: Optional[Path] = typer.Option(None, "--export", help=EXPORT_HELP),
 ) -> None:
     """Crea .nomedia en las carpetas de álbum para que las galerías no muestren las portadas."""
     from choconostle import gallery
@@ -903,7 +1116,9 @@ def fix_gallery(
         error_console.print("--remove no se combina con --all-folders ni con --include-root.", style="red",
                             markup=False)
         raise typer.Exit(code=2)
-    progress = _GalleryProgress(error_console, enabled=not no_progress and error_console.is_terminal)
+    view = _view(compact, full, export, error_console)
+    progress = _GalleryProgress(error_console, enabled=not no_progress and error_console.is_terminal,
+                                compact=view.compact)
     if remove:
         result = gallery.run_remove(path, only or [], apply=apply, include_hidden=include_hidden,
                                     progress=progress)
@@ -915,35 +1130,52 @@ def fix_gallery(
                             style="red", markup=False)
         raise typer.Exit(code=2)
 
+    options = dict(apply=apply, remove=remove, all_folders=all_folders, include_root=include_root, only=only)
+    exported = _export(view, error_console, lambda file_console: _print_gallery(
+        file_console, gallery, path, result, options, limit=0))
+    _print_gallery(console, gallery, path, result, options, limit, view.compact, exported)
+    if result.stopped is not None:
+        raise typer.Exit(code=3)
+    if result.errors:
+        raise typer.Exit(code=1)
+
+
+def _print_gallery(console: Console, gallery, path: Path, result, options: dict, limit: int,
+                   compact: bool = False, exported: Path | None = None) -> None:
+    """Resultado de fix-gallery. Los errores se listan siempre completos."""
+    apply, remove, all_folders = options["apply"], options["remove"], options["all_folders"]
     action = "quitar" if remove else "crear"
     title = ("APLICADO" if apply else "SIMULACIÓN (no se modificó nada)")
     console.print(f"[bold]fix-gallery ({action} .nomedia) - {title}[/bold]")
     print_copyable(console, f"Biblioteca: {path}")
-    if remove:
-        print_copyable(console, f"Lista de lo creado: {gallery.record_path(path)}")
-    else:
-        console.print("Modo: " + ("todas las carpetas con audio (--all-folders)" if all_folders
-                                  else "carpetas con imágenes"), markup=False)
+    if not compact:
+        if remove:
+            print_copyable(console, f"Lista de lo creado: {gallery.record_path(path)}")
+        else:
+            console.print("Modo: " + ("todas las carpetas con audio (--all-folders)" if all_folders
+                                      else "carpetas con imágenes"), markup=False)
     if result.root_note:
         console.print(result.root_note, style="yellow", markup=False)
-    console.print()
-    if remove:
-        _print_list(console, "Quitados" if apply else "Se quitarían", result.removed, limit)
-        if result.gone:
-            _print_list(console, "Ya no estaban", result.gone, limit)
-        if result.kept:
-            _print_list(console, "Se conservan", [f"{rel}: {why}" for rel, why in result.kept], limit)
-    else:
-        _print_list(console, "Creados" if apply else "Se crearían", result.created, limit)
-        if result.protected:
-            _print_list(console, "Omitidas por protección", [f"{rel}: {why}" for rel, why in result.protected],
-                        limit)
+    if not compact:
+        console.print()
+        if remove:
+            _print_list(console, "Quitados" if apply else "Se quitarían", result.removed, limit)
+            if result.gone:
+                _print_list(console, "Ya no estaban", result.gone, limit)
+            if result.kept:
+                _print_list(console, "Se conservan", [f"{rel}: {why}" for rel, why in result.kept], limit)
+        else:
+            _print_list(console, "Creados" if apply else "Se crearían", result.created, limit)
+            if result.protected:
+                _print_list(console, "Omitidas por protección",
+                            [f"{rel}: {why}" for rel, why in result.protected], limit)
     if result.errors:
         console.print(f"Con error ({len(result.errors)}):", style="red", markup=False)
         for rel, message in result.errors:
             print_copyable(console, f"  {rel}: {message}", "red")
     if result.record_error:
         print_copyable(console, f"No se pudo guardar la lista de lo creado: {result.record_error}", "red")
+    # Bloque final (las dos vistas): resumen, tiempo total, lista de lo creado y siguiente acción.
     console.print()
     if remove:
         console.print(f"Resumen: revisadas {result.reviewed}, {'quitadas' if apply else 'se quitarían'} "
@@ -954,20 +1186,28 @@ def fix_gallery(
                       f"{len(result.created)}, ya existentes {len(result.existing)}, omitidas {result.skipped} "
                       f"(sin {'audio' if all_folders else 'imágenes'} {result.not_matching}, protegidas "
                       f"{len(result.protected)}), con error {len(result.errors)}", markup=False)
-    if not apply and (result.removed if remove else result.created):
+    if exported is not None:
+        console.print("Lista completa guardada en:", markup=False)
+        print_copyable(console, str(exported))
+    print_elapsed(console)
+    pending = result.removed if remove else result.created
+    if not remove:
+        # fix-gallery no hace respaldo: la lista de lo creado es lo que permite deshacerlo (--remove).
+        console.print("Lista de lo creado " + ("(para deshacer con --remove):" if apply and pending
+                                               else "(se guardará en):" if pending else "(para --remove):"),
+                      markup=False)
+        print_copyable(console, str(gallery.record_path(path)))
+    if not apply and pending:
         console.print("Para aplicarlo, repite el comando con --apply.", markup=False)
     if result.stopped is not None:
         console.print()
         print_copyable(console, f"SE DETUVO: {result.stopped}", "bold red")
         console.print("Vuelve a ejecutar cuando la unidad esté conectada; seguirá donde quedó:", markup=False)
         args = ["choconostle", "fix-gallery", f'"{path}"']
-        args += [flag for flag, on in [("--all-folders", all_folders), ("--include-root", include_root),
+        args += [flag for flag, on in [("--all-folders", all_folders), ("--include-root", options["include_root"]),
                                        ("--remove", remove), ("--apply", apply)] if on]
-        args += [f'--only "{value}"' for value in only or []]
+        args += [f'--only "{value}"' for value in options["only"] or []]
         print_copyable(console, " ".join(args))
-        raise typer.Exit(code=3)
-    if result.errors:
-        raise typer.Exit(code=1)
 
 
 @app.command()

@@ -198,6 +198,8 @@ Mismas reglas de cabeceras y caracteres invisibles. Se conservan los saltos de l
 | `--resume CARPETA` | Continúa una ejecución detenida (ver «Bibliotecas grandes»). |
 | `--verify auto\|full\|quick` | Verificación tras escribir en archivos de audio (ver «Bibliotecas grandes»). Por defecto `auto`. |
 | `--no-progress` | No muestra la barra de progreso. |
+| `--compact` / `--full` | Fuerza la vista compacta o la completa (ver «Vista compacta»). |
+| `--export ARCHIVO` | Guarda la lista completa (archivos, cabeceras y diferencias) en un archivo de texto, también en la simulación. |
 
 Con `--encoding` distinto de `keep`, un archivo se convierte solo si todos sus caracteres caben en la codificación de destino; si no, se omite y se lista con los caracteres que faltan (nunca se sustituyen por `?`). Tampoco se convierte un archivo cuya codificación de origen no se pueda confirmar. `--encoding` no cambia los saltos de línea: para eso, y para indicar la codificación de origen, está `convert-lyrics`.
 
@@ -232,7 +234,7 @@ Se omiten, con el motivo contado en el resumen: ID3v2.2 (mutagen lo convertiría
 
 Antes y después de cada escritura:
 
-1. Se comprueba que el archivo no cambió desde la planificación: tamaño, fecha de modificación y bytes de las etiquetas.
+1. Se comprueba que el archivo no cambió desde la planificación: tamaño, fecha de modificación, bytes de las etiquetas y huella del audio. La huella se guarda en el plan y es el hash del primer y el último MB de lo que está fuera de la región de etiquetas (en Ogg, del archivo entero); con `--verify full` es además el hash de todo el audio. Sirve aunque la fecha no cambie (en Android dos escrituras seguidas pueden quedar con la misma `st_mtime_ns`). Sin `--verify full`, un cambio en el medio de un archivo de más de 2 MB no se detecta.
 2. Se calcula el hash de todo lo que está fuera de la región de etiquetas (el audio).
 3. Se guarda en el diario (`pendiente/` en el respaldo) la parte que se va a sobrescribir.
 4. Tras escribir se relee el archivo y se comprueba que la región quedó como estaba prevista, que todas las etiquetas que no son letras son idénticas byte a byte y que el hash del audio no cambió. Si algo no coincide, se restaura el original y se informa del error.
@@ -274,6 +276,16 @@ Solo cuentan como aplicados los archivos confirmados en el diario. Si la unidad 
 
 En ambos casos la región de etiquetas se relee y se verifica completa.
 
+`--verify` también decide la huella del audio que el plan guarda para detectar cambios entre planificar y aplicar. Lectura extra por archivo que se va a modificar (los que no cambian no leen nada más; un archivo de menos de 2 MB se lee entero una vez):
+
+| | Al planificar | Al aplicar, antes de escribir |
+|---|---|---|
+| `auto` / `quick`, edición en su sitio o al final | 2 MB | 0 (reutiliza el hash de `quick`) |
+| `auto`, reescritura completa (y Ogg) | 2 MB | 2 MB |
+| `full` | 2 MB + todo el audio | 0 (reutiliza el hash de `full`) |
+
+Un plan de la rc1 (sin huella) se puede reanudar con `--resume`: se avisa de que para esos archivos se usa la protección anterior (tamaño, fecha y etiquetas).
+
 Medición con 120 MP3 de 24 MB (2,94 GB), con la caché vaciada antes de cada pasada (`tools/medir_verificacion.py`):
 
 | | `--verify full` | `--verify quick` |
@@ -295,6 +307,41 @@ La segunda lectura de `full` sale de la caché del sistema, no del disco. Por es
 - El tiempo es lineal: unos 2 ms por archivo con `--apply` en disco local.
 
 `tools/medir_rendimiento.py` repite la medición en otra carpeta, por ejemplo en la SD. Con `--ruta-real` mide sobre una copia de tu biblioteca, sin modificar el original.
+
+## Vista compacta (terminales estrechas)
+
+Pensada para Termux en vertical. Vale para `normalize-lyrics`, `convert-lyrics`, `revert`, `clean-backups` y `fix-gallery`.
+
+**Cuándo se usa:**
+
+1. `--compact` la fuerza y `--full` la desactiva. Las dos juntas dan error (código 2).
+2. Si no se indica ninguna, `CHOCONOSTLE_COMPACT=1` la deja fija (y `CHOCONOSTLE_COMPACT=0`, la completa). Por ejemplo, en `~/.bashrc` de Termux: `export CHOCONOSTLE_COMPACT=1`.
+3. Si no, se activa sola cuando la terminal tiene menos de 70 columnas. Si el ancho no se puede leer (salida redirigida a un archivo, por ejemplo), se usa la vista completa.
+
+**Qué cambia:**
+
+- El progreso es una sola línea corta: indicador animado, archivos procesados (N/M) y tiempo restante, por ejemplo `⠋  12/340 archivos · restante 0:02:10`. Respeta `--no-progress` y no se anima si la salida no es una terminal.
+- En lugar de la lista de cambios, solo el resumen: a modificar, con desconocidos (cabeceras desconocidas o letras que requieren decisión), sin cambios, omitidas y errores. Si hay letras con cabeceras desconocidas se indica cuántas y se sugiere `--export` para verlas.
+- Siguen mostrándose completos los errores y los conflictos (archivo y motivo), los comandos para copiar (`--resume`, `revert`, «Respaldo guardado en»), cada uno en una sola línea, y el aviso de desconexión de la tarjeta (código 3).
+
+**`--export ARCHIVO`** guarda la lista completa en un archivo de texto: archivos, cabeceras, diferencias (como `--diff --limit 0`) y el bloque final. Funciona también en la simulación y en las dos vistas. En `revert` lista además cada letra con su resultado.
+
+```bash
+choconostle normalize-lyrics /sdcard/Music --strip-headers --compact --export ~/lista.txt
+```
+
+**Bloque final (en las dos vistas).** Al final de la salida se muestran el resumen, el tiempo total, la ruta del respaldo y la siguiente acción. En la simulación, la ruta es donde se guardará el respaldo, nunca uno ya creado:
+
+```text
+Resumen (42 letras): 12 a modificar, 3 con desconocidos, 25 sin cambios, 2 omitidas, 0 errores
+Tiempo total: 3,2 s
+Para aplicar, repite el comando con --apply. Antes se guardará un respaldo en:
+/sdcard/Music/ChoconostleLRCTool_back
+```
+
+Tras `--apply` se muestran «Respaldo guardado en:» y el comando de `revert`; en `revert`, la carpeta de respaldo; en `clean-backups`, la carpeta de respaldos; y en `fix-gallery`, que no hace respaldo, la lista de lo creado (lo que usa `--remove` para deshacerlo). La vista completa no cambia salvo este bloque final.
+
+**Tiempo total.** Se mide desde el inicio del comando y también se muestra cuando termina con error. Con `--apply` y `--resume` se escribe en `registro.txt` de la carpeta de respaldo; `revert` lo escribe en su `revert_<fecha>.txt` y en `registro.txt`.
 
 ## Respaldo y reversión
 

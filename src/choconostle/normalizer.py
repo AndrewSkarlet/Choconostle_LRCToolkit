@@ -35,7 +35,7 @@ from choconostle.config import NEARLY_EMPTY_MAX_LINES, STANDARD_HEADERS
 from choconostle.embedded import Slot, open_editor
 from choconostle.rawtags import MODE_FULL, REASONS, Unsupported, apply_patches, sha256
 from choconostle.rawtags.ogg import OggEditor
-from choconostle.rawtags.writer import Journal, file_signature, required_space
+from choconostle.rawtags.writer import VERIFY_AUTO, Journal, audio_fingerprint, file_signature, required_space
 from choconostle.models.lyrics import SOURCE_EXTERNAL
 from choconostle.models.track import Track
 from choconostle.scanner import LibraryScan
@@ -548,6 +548,8 @@ class LyricsNormalizer:
         self.offset_policy = offset_policy
         self.skip_near_empty = skip_near_empty
         self.allow_full_rewrite = allow_full_rewrite
+        # Verificación prevista (--verify): con full, el plan guarda el hash de todo el audio.
+        self.verify = VERIFY_AUTO
 
     # ------------------------------------------------------------------
 
@@ -747,7 +749,7 @@ class LyricsNormalizer:
         return changes
 
     def _plan_file_edit(self, editor, signature, changed: list[LyricsChange]) -> None:
-        plan_file_edit(editor, signature, changed, self.allow_full_rewrite)
+        plan_file_edit(editor, signature, changed, self.allow_full_rewrite, self.verify)
 
     def _plan_text_slot(self, change: LyricsChange, slot: Slot, headers) -> None:
         text = slot.value or ""
@@ -784,8 +786,10 @@ class LyricsNormalizer:
 
     @classmethod
     def from_options(cls, options: dict) -> "LyricsNormalizer":
-        return cls(options["mode"], options["encoding"], options["strip_unknown_headers"],
-                   options["offset_policy"], options["skip_near_empty"], options["allow_full_rewrite"])
+        processor = cls(options["mode"], options["encoding"], options["strip_unknown_headers"],
+                              options["offset_policy"], options["skip_near_empty"], options["allow_full_rewrite"])
+        processor.verify = options.get("verify", VERIFY_AUTO)
+        return processor
 
     def plan_one_file(self, path: Path, headers) -> LyricsChange:
         """Recalcula el cambio de un archivo de letra (al aplicar un plan guardado)."""
@@ -809,12 +813,16 @@ class LyricsNormalizer:
         return execution
 
 
-def plan_file_edit(editor, signature, changed: list[LyricsChange], allow_full_rewrite: bool) -> None:
+def plan_file_edit(editor, signature, changed: list[LyricsChange], allow_full_rewrite: bool,
+                   verify: str = VERIFY_AUTO) -> None:
     """
     Comprueba que la edición byte a byte de las letras `changed` de un
     archivo es posible y segura, y cómo se escribirá (en su sitio, al
     final o reescritura completa). Si no se puede, marca las letras como
     omitidas con el motivo. Compartida por normalize-lyrics y convert-lyrics.
+
+    El plan guarda la huella del audio (audio_fingerprint, según `verify`):
+    solo de los archivos que se van a modificar.
     """
     if not changed:
         return
@@ -845,8 +853,11 @@ def plan_file_edit(editor, signature, changed: list[LyricsChange], allow_full_re
         if not allow_full_rewrite:
             skip("full_rewrite", f"{note}. Usa --allow-full-rewrite para aplicarla.")
             return
+    is_ogg = isinstance(editor, OggEditor)
+    start, length = (0, 0) if is_ogg else (editor.start, len(editor.region))
     plan = {"signature": list(signature), "mode": edit.mode,
-            "region_sha": None if isinstance(editor, OggEditor) else sha256(editor.region)}
+            "region_sha": None if is_ogg else sha256(editor.region),
+            "audio": audio_fingerprint(editor.path, start, length, verify)}
     for change in changed:
         change.file_plan = plan
         if note:

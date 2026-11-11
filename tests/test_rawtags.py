@@ -281,9 +281,14 @@ def test_file_changed_between_plan_and_apply(gen, lyrics, tmp_path):
     root = tmp_path / "lib"
     mp3 = make_mp3(gen, root / "a.mp3", [gen.T("TIT2", "x"), gen.USLT(lyrics)])
     normalizer, changes = run(root)
+    info = mp3.stat()
     data = bytearray(mp3.read_bytes())
     data[-1] ^= 0xFF  # alguien cambia el archivo (aquí, el último byte de audio)
     mp3.write_bytes(bytes(data))
+    # Misma fecha de modificación, como en Android cuando dos escrituras caen en
+    # el mismo instante: el cambio se detecta por la huella del audio del plan.
+    import os
+    os.utime(mp3, ns=(info.st_atime_ns, info.st_mtime_ns))
     session = normalizer.apply(changes, root)
     item = session.manifest["items"][0]
     assert item["status"] == backup.ITEM_FAILED and "cambió" in item["error"]

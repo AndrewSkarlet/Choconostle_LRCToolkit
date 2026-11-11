@@ -5,7 +5,9 @@ Escritura segura de la región de etiquetas de un archivo de audio.
 
 Antes de escribir:
 - el archivo debe seguir igual que al planificar (tamaño, fecha de
-  modificación y bytes de la región);
+  modificación, bytes de la región y huella del audio: hash del primer y
+  el último MB de lo que está fuera de la región y, si se planificó con
+  --verify full, hash de todo; ver audio_fingerprint);
 - se calcula el hash de todo lo que está fuera de la región (el audio y
   el resto del archivo);
 - se guarda en el diario (carpeta "pendiente" del respaldo) la parte de
@@ -133,6 +135,49 @@ def _outside_sample(path: Path, start: int, length: int) -> str:
     return digest.hexdigest()
 
 
+AUDIO_CHANGED = "el audio cambió desde que se planearon los cambios"
+
+
+def audio_fingerprint(path: Path, start: int, length: int, verify: str = VERIFY_AUTO) -> dict:
+    """
+    Huella del audio para el plan: lo que está fuera de los bytes
+    [start, start + length) (la región de etiquetas; en Ogg, start = length = 0,
+    es decir, el archivo entero).
+
+    Siempre la muestra de VERIFY_QUICK (tamaño, primer y último MB). Con
+    VERIFY_FULL, además el SHA-256 de todo, que detecta también cambios en el
+    medio del audio.
+    """
+    fingerprint = {"start": start, "length": length, "sample": _outside_sample(path, start, length)}
+    if verify == VERIFY_FULL:
+        fingerprint["sha256"] = outside_hash(path, start, length, VERIFY_FULL)
+    return fingerprint
+
+
+def check_fingerprint(path: Path, fingerprint: dict | None, start: int, length: int,
+                      known: dict | None = None) -> None:
+    """
+    Comprueba antes de escribir que el audio sigue como al planificar. Lanza
+    ChangedError si no.
+
+    `known` son hashes ya calculados ({"sample": ...} o {"sha256": ...}) sobre
+    exactamente los mismos bytes [start, start + length); se reutilizan para no
+    volver a leer. Planes sin huella (rc1): no se comprueba nada aquí.
+    """
+    if not fingerprint:
+        return
+    if (fingerprint["start"], fingerprint["length"]) != (start, length):
+        raise ChangedError("las etiquetas cambiaron de posición desde que se planearon los cambios")
+    known = known or {}
+    if "sha256" in fingerprint:  # si todo coincide, la muestra también
+        key, compute = "sha256", lambda: outside_hash(path, start, length, VERIFY_FULL)
+    else:
+        key, compute = "sample", lambda: _outside_sample(path, start, length)
+    value = known.get(key) or compute()
+    if value != fingerprint[key]:
+        raise ChangedError(AUDIO_CHANGED)
+
+
 def effective_verify(verify: str, mode: str) -> str:
     """Verificación que corresponde a una edición: auto elige según si se reescribe el archivo."""
     if verify == VERIFY_AUTO:
@@ -202,9 +247,12 @@ class Journal:
 
 def write_edit(path: Path, editor, edit, journal: Journal, name: str,
                signature: tuple[int, int], root_path: str | None = None,
-               verify: str = VERIFY_FULL) -> dict:
+               verify: str = VERIFY_FULL, fingerprint: dict | None = None) -> dict:
     """
     Aplica `edit` (calculada sobre `editor.region`) al archivo.
+
+    `fingerprint` es la huella del audio guardada en el plan
+    (audio_fingerprint); se compara antes de escribir.
 
     Retorna un resumen {old_sha, new_sha, size_before, size_after, outside}.
     Lanza ChangedError, WriteError o RestoreError.
@@ -221,6 +269,10 @@ def write_edit(path: Path, editor, edit, journal: Journal, name: str,
         raise WriteError("la edición calculada no es segura: " + "; ".join(problems))
 
     before = outside_hash(path, editor.start, len(old), verify)
+    # `before` cubre los mismos bytes que la huella (fuera de [start, start + len(old)));
+    # check_fingerprint lo reutiliza solo si la posición coincide con la del plan.
+    check_fingerprint(path, fingerprint, editor.start, len(old),
+                      {"sample" if verify == VERIFY_QUICK else "sha256": before})
     size_before = signature[0]
     size_after = size_before + len(new) - len(old)
     summary = {"old_sha": sha256(old), "new_sha": sha256(new), "size_before": size_before,
@@ -336,7 +388,8 @@ def _rewrite_file(path: Path, start: int, old_len: int, new: bytes, before: str,
             os.unlink(long_path(temporary))
 
 
-def rewrite_with(path: Path, signature: tuple[int, int], modify, check) -> dict:
+def rewrite_with(path: Path, signature: tuple[int, int], modify, check,
+                 fingerprint: dict | None = None) -> dict:
     """
     Reescritura completa delegada (Ogg con mutagen): copia el archivo a un
     temporal, `modify(temporal)` lo cambia, `check(original, temporal)`
@@ -351,6 +404,8 @@ def rewrite_with(path: Path, signature: tuple[int, int], modify, check) -> dict:
     if free < need:
         raise WriteError(f"espacio insuficiente para la reescritura completa: requiere {need} bytes, hay {free}")
     original_sha = file_sha256(path)
+    # En Ogg la huella cubre el archivo entero: el hash completo ya está calculado.
+    check_fingerprint(path, fingerprint, 0, 0, {"sha256": original_sha})
     temporary = path.with_name(path.name + TEMP_SUFFIX)
     try:
         shutil.copyfile(long_path(path), long_path(temporary))
