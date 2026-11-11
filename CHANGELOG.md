@@ -2,6 +2,12 @@
 
 ## Sin publicar
 
+Versión de desarrollo `1.0.0rc3.dev0` en `pyproject.toml` y `config.py`. No hay release: la rc3 saldrá con el organizador de carpetas.
+
+### Cambiado (commit 6: versión)
+- Versión `1.0.0rc3.dev0` en `pyproject.toml` y `src/choconostle/config.py`.
+- Además: `docs/LIMPIEZA.md` (commit 5) lista el código y los archivos que parecen sin uso y lo que conviene conservar. No se borró nada.
+
 ### Agregado (commit 3: letras sospechosas)
 - Sección **«Letras sospechosas»** en `scan` (pantalla y `suspicious_lyrics` en el JSON) y en la simulación de `normalize-lyrics` (pantalla y `--export`; en la vista compacta, solo el número y la sugerencia de `--export`). Solo informa: nunca se modifica nada.
   - **Con URL o dominio:** `http://`, `https://`, `www.` y dominios con terminaciones poco ambiguas (`.com`, `.net`, `.org`, `.info`, `.xyz`, `.top`, `.site`, `.online`, `.club`, `.biz`, `.lyrics`, `.ru`, `.cn`). `.es`, `.me` o `.co` sin `www.` no cuentan, porque darían falsos positivos («mira.Es la vida»).
