@@ -31,6 +31,8 @@ Todo comando que escribe es una **simulación por defecto**: nada se modifica si
 - Incrustadas: MP3 USLT/SYLT, FLAC/Ogg LYRICS/UNSYNCEDLYRICS, M4A ©lyr, APE/WavPack Lyrics y Matroska LYRICS.
 - Separa letras sincronizadas (con marcas de tiempo) de sin sincronizar, sin importar la extensión.
 - Problemas que se pueden corregir con `normalize-lyrics` y `convert-lyrics`: cabeceras LRC (`[ar:]`, `[ti:]`, `[al:]`, `[length:]`, `[offset:]`...), BOM y codificaciones distintas de UTF-8. Algunos reproductores (por ejemplo, Poweramp en Android) no cargan letras con cabeceras.
+- Instrumentales (`[instrumental:true]`): se cuentan aparte y no se marcan como vacías.
+- **Letras sospechosas** (solo aviso, ver más abajo): con URL o dominio, el mismo texto en muchas canciones distintas y letras muy cortas que no parecen letra. También en el JSON (`suspicious_lyrics`).
 
 **Portadas:** `Cover.jpg`/`Folder.jpg` (también `.jpeg`, `.png`, `.webp`; sin distinguir mayúsculas) y portada incrustada.
 
@@ -161,7 +163,25 @@ Solo cambia lo que se pide. Las líneas que no son cabeceras se conservan byte p
 
 Las líneas con forma `[palabra:valor]` del bloque inicial que no están en la lista (por ejemplo, `[xtrack:7]`) se conservan y se listan en la sección «Desconocidos / requieren decisión». El bloque inicial son las líneas anteriores a la primera línea de letra (con o sin marca de tiempo); puede incluir líneas vacías.
 
-Con `--strip-unknown-headers` se quitan, pero solo las del bloque inicial. Una línea `[Coro: Artista]` a mitad de la letra nunca se toca. Todo lo que se quita aparece en `--diff` y en `registro.txt`. Ojo: si una letra empieza con `[Coro: Artista]`, esa línea sí forma parte del bloque inicial.
+Con `--strip-unknown-headers` se quitan, pero solo las del bloque inicial. Todo lo que se quita aparece en `--diff` y en `registro.txt`.
+
+### Secciones, instrumentales y datos extendidos (SpotiFLAC)
+
+Estas líneas parecen cabeceras, pero no son desconocidas:
+
+- **Etiquetas de sección** estilo Genius: `[Intro: Pitbull & Lil Jon]`, `[Chorus]`, `[Verse 1]`, `[Pre-Chorus]`... En inglés: Intro, Verse, Pre-Chorus, Chorus, Post-Chorus, Bridge, Outro, Hook, Refrain, Interlude, Breakdown y Drop. En español: Intro, Verso, Precoro, Coro, Estribillo, Puente, Outro e Interludio. Con o sin número y con o sin «: artista», sin distinguir mayúsculas. Son **letra**: nunca se quitan (tampoco con `--strip-unknown-headers`) y terminan el bloque inicial. No cuentan como línea con texto para «casi vacía».
+- **`[instrumental:true]`**: se conserva siempre, no se marca como vacía ni casi vacía y se cuenta aparte como «Instrumentales» (también en `scan`).
+- **Datos extendidos de SpotiFLAC**: `[x-romaji:...]`, `[x-romaji-words:...]`, `[x-translation:...]` (formato `tiempo_ms:base64`) y cualquier otra `[x-...:]`. Con `--strip-headers` y con `--standardize-headers` se quitan **solo** si están en el bloque inicial, antes de la primera línea de letra (una sección también es letra). Si aparecen después, no se tocan. En `--diff` («quita 4 datos extendidos (SpotiFLAC)»), en el resumen y en `--export` se cuentan como «datos extendidos (SpotiFLAC)».
+
+### Letras sospechosas
+
+`scan` y la simulación de `normalize-lyrics` muestran la sección «Letras sospechosas». Solo es un aviso: no se modifica nada.
+
+- **Con URL o dominio:** `http://`, `https://`, `www.` y dominios terminados en `.com`, `.net`, `.org`, `.info`, `.xyz`, `.top`, `.site`, `.online`, `.club`, `.biz`, `.lyrics`, `.ru` o `.cn`. Sin `www.`, las terminaciones ambiguas como `.es`, `.me` o `.co` no cuentan («mira.Es la vida»).
+- **Mismo texto en muchas canciones distintas:** se compara sin marcas de tiempo, cabeceras, secciones, mayúsculas ni espacios. Por defecto, 5 canciones o más; se cambia con `--repeat-threshold N`. Cada grupo muestra el título y la ruta de cada canción, para distinguir remixes y versiones (Slowed, Sped Up) de publicidad o textos de relleno.
+- **Muy cortas, no parecen letra:** menos de 40 letras en total. Una letra «casi vacía» (2 líneas con texto o menos) sale solo en su sección, nunca en las dos; las instrumentales no cuentan.
+
+En la vista compacta solo se indica cuántas hay; la lista completa está en `--export` y en el JSON de `scan` (`suspicious_lyrics`).
 
 ### `[offset:]`
 
@@ -200,6 +220,8 @@ Mismas reglas de cabeceras y caracteres invisibles. Se conservan los saltos de l
 | `--no-progress` | No muestra la barra de progreso. |
 | `--compact` / `--full` | Fuerza la vista compacta o la completa (ver «Vista compacta»). |
 | `--export ARCHIVO` | Guarda la lista completa (archivos, cabeceras y diferencias) en un archivo de texto, también en la simulación. |
+| `--no-input` | No pregunta «¿Guardar la lista completa?» al terminar la simulación. |
+| `--repeat-threshold N` | Letras sospechosas: avisa si el mismo texto está en N canciones distintas o más (por defecto 5). |
 
 Con `--encoding` distinto de `keep`, un archivo se convierte solo si todos sus caracteres caben en la codificación de destino; si no, se omite y se lista con los caracteres que faltan (nunca se sustituyen por `?`). Tampoco se convierte un archivo cuya codificación de origen no se pueda confirmar. `--encoding` no cambia los saltos de línea: para eso, y para indicar la codificación de origen, está `convert-lyrics`.
 
@@ -248,7 +270,9 @@ Antes y después de cada escritura:
 1. **Planificación.** Recorre la biblioteca carpeta por carpeta. Lee las etiquetas, nunca el audio completo, y escribe cada cambio en `plan.jsonl`. En memoria solo están la carpeta actual y los totales.
 2. **Aplicación.** Lee el plan y aplica cada entrada. Antes de escribir comprueba que el original no cambió desde la planificación y que el resultado recalculado es exactamente el planeado. Un archivo modificado por otro programa en medio se marca como error y no se toca.
 
-En la terminal se ven los archivos procesados, los cambios, los errores, el tiempo transcurrido y el tiempo restante estimado.
+En la terminal, cada barra muestra el paso, los archivos procesados (N/M) y el tiempo transcurrido, por ejemplo `⠋ Aplicando 1234/4468 · 0:12:40`, más el nombre del archivo en curso en la vista completa (recortado al ancho de la terminal). En las verificaciones largas el paso pasa a «Verificando audio». Todas las barras (`scan`, planificación, aplicación, `revert`, `clean-backups` y `fix-gallery`) usan el mismo formato.
+
+Medido con una biblioteca real en una tarjeta SD desde el teléfono (LG G8, Termux): 6690 letras en 4468 archivos; simulación en 8 min 45 s y `--apply` en 31 min 23 s, con 0 errores y un 8 % de batería sin cargador.
 
 **Espacio libre.** Antes de aplicar se calcula el espacio necesario: copias de respaldo y parches, más el temporal más grande (una reescritura completa necesita el tamaño del archivo), más un margen de 16 MB. Si no hay suficiente, no se modifica nada. Si el disco se llena a mitad de ejecución, el archivo en curso se restaura y la ejecución se detiene.
 
@@ -320,11 +344,19 @@ Pensada para Termux en vertical. Vale para `normalize-lyrics`, `convert-lyrics`,
 
 **Qué cambia:**
 
-- El progreso es una sola línea corta: indicador animado, archivos procesados (N/M) y tiempo restante, por ejemplo `⠋  12/340 archivos · restante 0:02:10`. Respeta `--no-progress` y no se anima si la salida no es una terminal.
+- El progreso es una sola línea corta, con el mismo formato que en la vista completa pero sin el nombre del archivo: `⠋ Aplicando 12/340 · 0:02:10`. Respeta `--no-progress` y no se anima si la salida no es una terminal.
 - En lugar de la lista de cambios, solo el resumen: a modificar, con desconocidos (cabeceras desconocidas o letras que requieren decisión), sin cambios, omitidas y errores. Si hay letras con cabeceras desconocidas se indica cuántas y se sugiere `--export` para verlas.
 - Siguen mostrándose completos los errores y los conflictos (archivo y motivo), los comandos para copiar (`--resume`, `revert`, «Respaldo guardado en»), cada uno en una sola línea, y el aviso de desconexión de la tarjeta (código 3).
 
-**`--export ARCHIVO`** guarda la lista completa en un archivo de texto: archivos, cabeceras, diferencias (como `--diff --limit 0`) y el bloque final. Funciona también en la simulación y en las dos vistas. En `revert` lista además cada letra con su resultado.
+**`--export ARCHIVO`** guarda la lista completa en un archivo de texto: archivos, cabeceras, diferencias (como `--diff --limit 0`), letras sospechosas y el bloque final. Funciona también en la simulación y en las dos vistas. En `revert` lista además cada letra con su resultado. Mientras escribe muestra «Guardando la lista en ...».
+
+**«¿Guardar la lista completa? (s/N)».** Al terminar una simulación o `--diff` (también `revert --dry-run`, `clean-backups` y `fix-gallery` sin `--apply`), si la entrada y la salida son una terminal interactiva y no se usó `--export`, se pregunta si se guarda la lista. Si la respuesta es sí, se pide la ruta, con este valor por defecto:
+
+- en Termux, `~/storage/shared/Download` si existe (lo crea `termux-setup-storage`); si no, la carpeta personal;
+- el nombre es `choconostle_<comando>_<fecha-hora>.txt`;
+- nunca se propone la carpeta actual ni una ruta dentro de la biblioteca o del repositorio (en ese caso, la carpeta temporal del sistema).
+
+Sin terminal (salida redirigida, scripts) no se pregunta nada. `--no-input` desactiva la pregunta.
 
 ```bash
 choconostle normalize-lyrics /sdcard/Music --strip-headers --compact --export ~/lista.txt
@@ -510,12 +542,18 @@ choconostle fix-gallery /sdcard/Music --remove --apply
 
 Resumen; la lista completa está en [docs/PENDIENTES.md](docs/PENDIENTES.md).
 
-**Probado por el autor con la versión 1.0.0rc1:**
+**Probado por el autor con la versión 1.0.0rc2:**
 
-- Windows: la suite automática completa; ciclos de `--apply` y `revert` con FLAC y M4A reales, comparados byte a byte; una desconexión real de una tarjeta SD a mitad de ejecución, seguida de `--resume` (129 archivos, 0 diferencias); rutas de más de 260 caracteres; `clean-backups` y `fix-gallery`.
+- Suite automática completa: 525/525 en Windows, Moto Edge 60 Fusion, LG G8 y Samsung A31 (Termux).
+- Tarjeta SD desde el teléfono, con la biblioteca real: LG G8 con Termux, 6690 letras en 4468 archivos; simulación en 8 min 45 s, `--apply` en 31 min 23 s, 0 errores, 8 % de batería sin cargador. Una segunda simulación dio 0 a modificar, y Poweramp y otra app leen bien las letras.
+- Resuelto: un cambio externo solo en el audio entre planificar y aplicar no se detectaba en Android (misma `st_mtime_ns`); ahora el plan guarda la huella del audio.
+
+**Probado con la versión 1.0.0rc1:**
+
+- Windows: ciclos de `--apply` y `revert` con FLAC y M4A reales, comparados byte a byte; una desconexión real de una tarjeta SD a mitad de ejecución, seguida de `--resume` (129 archivos, 0 diferencias); rutas de más de 260 caracteres; `clean-backups` y `fix-gallery`.
 - Android (Termux): `--apply` y `revert` con FLAC reales en la memoria interna; `fix-gallery` en un teléfono con una app de música.
 
-**No probado:** tarjeta SD desde el teléfono, NAS, ARM, un disco lleno real (solo simulado), el editor ID3 con MP3 reales con cabeceras, otras apps de música con `.nomedia`, uso de CPU y batería.
+**No probado:** NAS, ARM fuera de Android, un disco lleno real (solo simulado), el editor ID3 con MP3 reales con cabeceras, otras apps de música con `.nomedia`, uso de CPU. Lo nuevo de la 1.0.0rc3.dev0 (secciones, letras sospechosas, barras y pregunta al final) solo con la suite automática.
 
 ## Estructura
 
