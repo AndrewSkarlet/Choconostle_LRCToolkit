@@ -78,6 +78,12 @@ _HEADER = "header"
 _UNKNOWN = "unknown"
 _BLANK = "blank"
 _TEXT = "text"
+_SECTION = "section"
+"""[Chorus], [Intro: Artista]...: letra; nunca se quita."""
+_INSTRUMENTAL = "instrumental"
+"""[instrumental:true]: se conserva siempre."""
+_EXTENDED = "extended"
+"""[x-romaji:...] de SpotiFLAC: se quita solo en el bloque inicial."""
 
 
 # --------------------------------------------------------------------------
@@ -224,6 +230,12 @@ class TextResult:
     removed_unknown: list[str] = field(default_factory=list)
     unknown_headers: list[str] = field(default_factory=list)
     """Cabeceras desconocidas que se conservan ([xtrack:]...)."""
+    removed_extended: int = 0
+    """Líneas [x-...:] de SpotiFLAC quitadas del bloque inicial."""
+    kept_extended: int = 0
+    """Líneas [x-...:] después de la primera línea de letra (no se tocan)."""
+    instrumental: bool = False
+    """Tiene [instrumental:true]."""
     written_headers: list[str] = field(default_factory=list)
     offsets: list[str] = field(default_factory=list)
     """Valores de todas las cabeceras [offset:], tal como aparecen."""
@@ -251,6 +263,10 @@ def normalize_text(
     - Separa líneas solo por CRLF, CR y LF y conserva cada delimitador.
     - Quita las cabeceras conocidas (en cualquier posición) y, con
       strip_unknown, las líneas [palabra:valor] del bloque inicial.
+    - Quita los datos extendidos de SpotiFLAC ([x-romaji:...]) solo si están
+      en el bloque inicial, antes de la primera línea de letra.
+    - Las etiquetas de sección ([Chorus], [Intro: Artista]) son letra y
+      [instrumental:true] se conserva: nunca se quitan.
     - Quita las líneas vacías que quedan al inicio justo después de las
       cabeceras retiradas.
     - `block`: líneas de cabecera ya formateadas que se escriben al inicio
@@ -271,6 +287,20 @@ def normalize_text(
             result.synced = True
             if lrc.has_text_after_timestamps(core, timestamp):
                 result.content_lines += 1
+        elif lrc.is_section(content):
+            kind = _SECTION
+        elif lrc.is_instrumental(content):
+            kind = _INSTRUMENTAL
+            result.instrumental = True
+        elif lrc.is_extended(content):
+            if in_initial_block:
+                kind = _EXTENDED
+            else:
+                kind = _TEXT  # después de la letra: no se toca
+                result.kept_extended += 1
+                kinds.append(kind)
+                names.append(None)
+                continue
         elif lrc.header_name(content):
             kind = _HEADER
             name = lrc.header_name(content)
@@ -282,13 +312,15 @@ def normalize_text(
         else:
             kind = _TEXT
             result.content_lines += 1
-        if kind in (_SYNCED, _TEXT):
+        if kind in (_SYNCED, _TEXT, _SECTION):
             in_initial_block = False
         kinds.append(kind)
         names.append(name)
 
-    result.nearly_empty = result.content_lines <= NEARLY_EMPTY_MAX_LINES
-    if result.content_lines == 0:
+    result.nearly_empty = result.content_lines <= NEARLY_EMPTY_MAX_LINES and not result.instrumental
+    if result.instrumental:
+        pass  # [instrumental:true]: sin letra a propósito
+    elif result.content_lines == 0:
         result.warnings.append("Vacía (sin líneas con texto).")
     elif result.nearly_empty:
         result.warnings.append(f"Casi vacía: solo {plural(result.content_lines, 'línea')} con texto.")
@@ -330,6 +362,12 @@ def normalize_text(
             remove.add(index)
             result.removed_headers.append(names[index])
             after_removed = True
+        elif kind == _EXTENDED:
+            remove.add(index)
+            result.removed_extended += 1
+            after_removed = True
+        elif kind == _INSTRUMENTAL:
+            kept_in_block = True
         elif kind == _UNKNOWN:
             if strip_unknown:
                 remove.add(index)
@@ -363,7 +401,8 @@ def normalize_text(
         result.written_headers = [lrc.header_name(line) or line for line in block]
         new_lines = [(line, newline) for line in block] + new_lines
 
-    body = [(content, eol) for (content, eol), kind in zip(lines, kinds) if kind in (_SYNCED, _TEXT)]
+    body = [(content, eol) for (content, eol), kind in zip(lines, kinds)
+            if kind in (_SYNCED, _TEXT, _SECTION, _INSTRUMENTAL)]
     result.text = "".join(content + eol for content, eol in new_lines)
     result.changed = result.text != text
     result.empty_result = result.changed and not any(content.strip() for content, _eol in body)
@@ -377,11 +416,14 @@ def normalize_sylt(entries: list, strip_unknown: bool = False) -> TextResult:
     """
     texts = [text for text, _time in entries]
     result = TextResult(text="\n".join(texts))
-    content = [text for text in texts if text.strip() and not lrc.header_key(text)]
+    result.instrumental = any(lrc.is_instrumental(text) for text in texts)
+    content = [text for text in texts if text.strip() and not lrc.header_key(text) and not lrc.is_section(text)]
     result.synced = True
     result.content_lines = len(content)
-    result.nearly_empty = result.content_lines <= NEARLY_EMPTY_MAX_LINES
-    if not content:
+    result.nearly_empty = result.content_lines <= NEARLY_EMPTY_MAX_LINES and not result.instrumental
+    if result.instrumental:
+        pass
+    elif not content:
         result.warnings.append("Vacía (sin líneas con texto).")
     elif result.nearly_empty:
         result.warnings.append(f"Casi vacía: solo {plural(len(content), 'línea')} con texto.")
@@ -391,6 +433,20 @@ def normalize_sylt(entries: list, strip_unknown: bool = False) -> TextResult:
     kept = []
     in_block = True
     for text, time in entries:
+        if lrc.is_section(text):
+            in_block = False
+            kept.append((text, time))
+            continue
+        if lrc.is_instrumental(text):
+            kept.append((text, time))
+            continue
+        if lrc.is_extended(text):
+            if in_block:
+                result.removed_extended += 1
+            else:
+                result.kept_extended += 1
+                kept.append((text, time))
+            continue
         name = lrc.header_name(text)
         key = lrc.header_key(text)
         if name:
@@ -405,7 +461,7 @@ def normalize_sylt(entries: list, strip_unknown: bool = False) -> TextResult:
             in_block = False
         kept.append((text, time))
     result.changed = kept != list(entries)
-    result.empty_result = result.changed and not content
+    result.empty_result = result.changed and not content and not result.instrumental
     result.text = "\n".join(text for text, _time in kept)
     result.entries = kept
     return result
@@ -476,6 +532,9 @@ class LyricsChange:
     message: str | None = None
     nearly_empty: bool = False
     unknown_headers: list[str] = field(default_factory=list)
+    instrumental: bool = False
+    extended: int = 0
+    """Datos extendidos de SpotiFLAC ([x-...:]) quitados (bloque inicial) o conservados."""
 
     # Archivos.
     original_bytes: bytes | None = None
@@ -516,6 +575,9 @@ def _describe(result: TextResult) -> list[str]:
                if name not in result.written_headers]
     if removed:
         details.append("quita " + " ".join(f"[{name}:]" for name in removed))
+    if result.removed_extended:
+        details.append(f"quita {plural(result.removed_extended, 'dato extendido', 'datos extendidos')} "
+                       "(SpotiFLAC)")
     if result.removed_unknown:
         details.append("quita desconocidas " + " ".join(
             f"[{name}:]" for name in dict.fromkeys(result.removed_unknown)))
@@ -606,6 +668,12 @@ class LyricsNormalizer:
         change.warnings += result.warnings
         change.nearly_empty = result.nearly_empty
         change.unknown_headers = list(dict.fromkeys(result.unknown_headers))
+        change.instrumental = result.instrumental
+        change.extended = result.removed_extended + result.kept_extended
+        if result.kept_extended:
+            change.warnings.append(
+                f"{plural(result.kept_extended, 'dato extendido', 'datos extendidos')} (SpotiFLAC) después "
+                "de la letra: no se tocan.")
         if result.decision:
             change.status = STATUS_DECISION
             change.message = result.decision

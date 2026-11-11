@@ -35,6 +35,22 @@ TIMESTAMP_RE = re.compile(r"^\s*(?:\[\d{1,3}:\d{1,2}(?:[.:,]\d{1,3})?\]\s*)+", r
 HEADER_RE = re.compile(r"^\s*\[([A-Za-z#][A-Za-z0-9_#-]*)\s*:(.*)\]\s*$", re.ASCII)
 _HEADER_TAGS = set(LRC_HEADER_TAGS)
 
+# Etiquetas de sección estilo Genius: [Intro], [Verse 2], [Pre-Chorus: Artista],
+# [Coro]... Son parte de la letra: nunca son cabeceras ni se quitan.
+SECTION_NAMES = [
+    "intro", "verse", "pre-chorus", "chorus", "post-chorus", "bridge", "outro", "hook", "refrain",
+    "interlude", "breakdown", "drop",
+    "verso", "pre-coro", "coro", "estribillo", "puente", "interludio",
+]
+_SECTION_WORDS = "|".join(name.replace("-", "[- ]?") for name in SECTION_NAMES)
+SECTION_RE = re.compile(r"^\s*\[\s*(?:" + _SECTION_WORDS + r")(?:\s*\d+)?\s*(?::[^\]]*)?\]\s*$",
+                        re.IGNORECASE)
+
+# [instrumental:true]: la canción no tiene letra (a veces es todo el archivo).
+INSTRUMENTAL_KEY = "instrumental"
+# Datos extendidos de SpotiFLAC: [x-romaji:...], [x-translation:...] (tiempo_ms:base64).
+EXTENDED_PREFIX = "x-"
+
 # Marcas de tiempo por palabra del formato LRC mejorado: <mm:ss.xx>.
 WORD_TIMESTAMP_RE = re.compile(r"<\d{1,3}:\d{1,2}(?:[.:,]\d{1,3})?>", re.ASCII)
 
@@ -71,6 +87,28 @@ def header_key(line: str) -> str | None:
     return match.group(1) if match else None
 
 
+def is_section(line: str) -> bool:
+    """True si la línea es una etiqueta de sección ([Chorus], [Intro: Artista], [Verso 1]...)."""
+    _prefix, core = strip_invisible_prefix(line)
+    return bool(SECTION_RE.match(core))
+
+
+def is_instrumental(line: str) -> bool:
+    """True si la línea es [instrumental:...] (sin distinguir mayúsculas)."""
+    if is_section(line):
+        return False
+    key = header_key(line)
+    return key is not None and key.lower() == INSTRUMENTAL_KEY
+
+
+def is_extended(line: str) -> bool:
+    """True si la línea es un dato extendido de SpotiFLAC ([x-romaji:...], [x-translation:...])."""
+    if is_section(line):
+        return False
+    key = header_key(line)
+    return key is not None and key.lower().startswith(EXTENDED_PREFIX)
+
+
 def header_value(line: str) -> str:
     _prefix, core = strip_invisible_prefix(line)
     match = HEADER_RE.match(core)
@@ -102,6 +140,8 @@ def analyze_text(
     plain_lines = 0
     content_lines = 0
     headers: list[str] = []
+    instrumental = False
+    sections = 0
 
     for line in line_contents(text):
         if not line.strip():
@@ -117,7 +157,15 @@ def analyze_text(
             if name not in headers:
                 headers.append(name)
             continue
+        if is_instrumental(line):
+            instrumental = True
+            continue
+        if is_extended(line):
+            continue  # datos de SpotiFLAC: no son texto de la letra
         plain_lines += 1
+        if is_section(line):
+            sections += 1  # parte de la letra, pero no cuenta como línea con texto
+            continue
         content_lines += 1
 
     return LyricsInfo(
@@ -130,9 +178,10 @@ def analyze_text(
         has_bom=has_bom,
         encoding=encoding,
         is_utf8=encoding in ("utf-8", "ascii"),
-        empty=timestamp_lines == 0 and plain_lines == 0,
+        empty=timestamp_lines == 0 and plain_lines == 0 and not instrumental,
         content_lines=content_lines,
-        nearly_empty=content_lines <= NEARLY_EMPTY_MAX_LINES,
+        nearly_empty=content_lines <= NEARLY_EMPTY_MAX_LINES and not instrumental,
+        instrumental=instrumental,
     )
 
 

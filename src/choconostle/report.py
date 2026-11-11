@@ -145,6 +145,8 @@ def build_report(scan: LibraryScan, group_by: str = GROUP_BY_FOLDER) -> dict:
             issue_counts["bom"] += 1
         if not lyrics.is_utf8:
             issue_counts["not_utf8"] += 1
+        if lyrics.instrumental:
+            issue_counts["instrumental"] += 1
         if lyrics.nearly_empty and not lyrics.error:
             nearly_empty.append({
                 "track": _rel(track.filepath, root) if track else None,
@@ -217,6 +219,7 @@ def build_report(scan: LibraryScan, group_by: str = GROUP_BY_FOLDER) -> dict:
             "with_headers": issue_counts["headers"],
             "with_bom": issue_counts["bom"],
             "not_utf8": issue_counts["not_utf8"],
+            "instrumental": issue_counts["instrumental"],
             "header_counts": dict(header_counts.most_common()),
         },
         "lyrics_to_fix": to_fix,
@@ -347,6 +350,9 @@ def print_report(report: dict, console: Console | None = None, limit: int = 20) 
     table.add_row("Solo sin sincronizar",
                   f"{summary['lyrics_unsynced']} ({percent(summary['lyrics_unsynced'], total)})")
     table.add_row("Sin letra", f"{summary['lyrics_none']} ({percent(summary['lyrics_none'], total)})")
+    instrumental = report["lyrics_issues"].get("instrumental", 0)
+    if instrumental:
+        table.add_row("Instrumentales ([instrumental:true])", str(instrumental))
     console.print(table)
 
     found = report["lyrics_found"]
@@ -634,6 +640,10 @@ def print_run_report(
         table.add_row("Con cabeceras desconocidas (se conservan)", str(totals["unknown"]))
     if command != "convert-lyrics":
         table.add_row("Casi vacías (aviso)", str(totals["nearly_empty"]))
+    if totals.get("instrumental"):
+        table.add_row("Instrumentales (se conservan)", str(totals["instrumental"]))
+    if totals.get("extended"):
+        table.add_row("Con datos extendidos (SpotiFLAC)", str(totals["extended"]))
     rewrites = totals.get("full_rewrites") or {}
     if rewrites:
         detail = ", ".join(f"{ext.upper()}: {count}" for ext, count in sorted(rewrites.items()))
@@ -785,8 +795,12 @@ def run_summary_line(totals, statuses, applied: bool, applied_count: int = 0, fa
         pending = totals["entries"] - applied_count - failed_count
         if pending > 0:
             parts.append(f"{pending} sin aplicar")
-    parts += [f"{totals['unknown'] + statuses.get('decision', 0)} con desconocidos",
-              f"{statuses.get('unchanged', 0)} sin cambios",
+    parts += [f"{totals['unknown'] + statuses.get('decision', 0)} con desconocidos"]
+    if totals.get("instrumental"):
+        parts.append(f"{totals['instrumental']} instrumentales")
+    if totals.get("extended"):
+        parts.append(f"{totals['extended']} con datos extendidos (SpotiFLAC)")
+    parts += [f"{statuses.get('unchanged', 0)} sin cambios",
               f"{statuses.get('skipped', 0)} omitidas",
               f"{statuses.get('error', 0)} errores"]
     return f"Resumen ({plural(totals['lyrics'], 'letra')}): " + ", ".join(parts)

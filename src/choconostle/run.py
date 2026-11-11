@@ -451,6 +451,7 @@ def _base_record(change) -> dict:
         "status": change.status, "label": change.label, "details": list(change.details),
         "warnings": list(change.warnings), "message": change.message, "skip_reason": change.skip_reason,
         "nearly_empty": change.nearly_empty, "unknown": list(change.unknown_headers),
+        "instrumental": change.instrumental, "extended": change.extended,
     }
 
 
@@ -551,6 +552,9 @@ class Totals:
     """Entradas a aplicar (archivos de letra + archivos de audio)."""
     nearly_empty: int = 0
     unknown: int = 0
+    instrumental: int = 0
+    extended: int = 0
+    """Letras con datos extendidos de SpotiFLAC ([x-...:])."""
     skip_reasons: Counter = field(default_factory=Counter)
     """Archivos de audio omitidos por motivo."""
     space: int = 0
@@ -568,6 +572,8 @@ class Totals:
             self.statuses[slot["status"]] += 1
             self.nearly_empty += bool(slot["nearly_empty"])
             self.unknown += bool(slot["unknown"])
+            self.instrumental += bool(slot.get("instrumental"))
+            self.extended += bool(slot.get("extended"))
         reasons = {slot["skip_reason"] for slot in slots if slot["status"] == "skipped" and slot["skip_reason"]}
         for reason in reasons:
             self.skip_reasons[reason] += 1
@@ -600,6 +606,7 @@ class Totals:
         return {"lyrics": self.lyrics, "statuses": dict(self.statuses), "files_changed": self.files_changed,
                 "embedded_changed": self.embedded_changed, "songs_changed": self.songs_changed,
                 "entries": self.entries, "nearly_empty": self.nearly_empty, "unknown": self.unknown,
+                "instrumental": self.instrumental, "extended": self.extended,
                 "skip_reasons": dict(self.skip_reasons), "space": self.space,
                 "largest_rewrite": self.largest_rewrite, "needed": self.needed(),
                 "files_seen": self.files_seen, "full_rewrites": dict(self.full_rewrites)}

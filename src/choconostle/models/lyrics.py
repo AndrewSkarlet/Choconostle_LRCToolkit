@@ -42,6 +42,8 @@ class LyricsInfo:
     """Líneas con texto de la letra (sin contar cabeceras ni marcas vacías)."""
     nearly_empty: bool = False
     """Pocas líneas con texto (ver NEARLY_EMPTY_MAX_LINES). Se marcan, no se corrigen."""
+    instrumental: bool = False
+    """Tiene [instrumental:true]: no se cuenta como vacía ni casi vacía."""
     error: str | None = None
 
     @property
@@ -67,6 +69,7 @@ class LyricsInfo:
             "empty": self.empty,
             "content_lines": self.content_lines,
             "nearly_empty": self.nearly_empty,
+            "instrumental": self.instrumental,
             "needs_fix": self.needs_fix,
             "error": self.error,
         }

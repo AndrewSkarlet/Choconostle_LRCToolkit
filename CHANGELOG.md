@@ -1,5 +1,14 @@
 # Changelog
 
+## Sin publicar
+
+### Cambiado (commit 1: lo que salía como «desconocido»)
+En la biblioteca real (6690 letras) salieron 287 letras con «desconocidos» de tres tipos. Ahora se clasifican:
+- **Etiquetas de sección estilo Genius** (`[Intro: Pitbull & Lil Jon]`, `[Chorus]`, `[Verse 1]`, `[Pre-Chorus]`...): en inglés Intro, Verse, Pre-Chorus, Chorus, Post-Chorus, Bridge, Outro, Hook, Refrain, Interlude, Breakdown y Drop; en español Intro, Verso, Precoro (o Pre-coro), Coro, Estribillo, Puente, Outro e Interludio; con o sin número y con o sin «: artista», sin distinguir mayúsculas. Son letra: no se listan como desconocidas y nunca se quitan, tampoco con `--strip-unknown-headers` ni en SYLT. Como son letra, terminan el bloque inicial. No cuentan como «línea con texto» para «casi vacía».
+- **`[instrumental:true]`**: se reconoce, se conserva siempre y no se marca como vacía ni casi vacía. Se cuenta aparte como «Instrumentales» en el reporte de `normalize-lyrics` y en `scan` (pantalla y `lyrics_issues.instrumental` en el JSON).
+- **Datos extendidos de SpotiFLAC** (`[x-romaji:...]`, `[x-romaji-words:...]`, `[x-translation:...]` y cualquier `[x-...:]`): con `--strip-headers` y con `--standardize-headers` se quitan **solo** si están en el bloque inicial, antes de la primera línea de letra. Si aparecen después, no se tocan (aviso en la letra). En `--diff` («quita N datos extendidos (SpotiFLAC)»), en el reporte y en `--export` se cuentan como «datos extendidos (SpotiFLAC)».
+- Pruebas nuevas en `tests/test_secciones.py` (incluye un archivo con `x-` después de la letra, que no cambia, y uno con `[Intro: ...]` justo después de las cabeceras). `test_section_labels_are_kept` ya no espera `[Coro:]` como desconocida.
+
 ## v1.0.0-rc2
 
 Versión candidata (`1.0.0rc2` en `pyproject.toml` y `config.py`). Novedades:
