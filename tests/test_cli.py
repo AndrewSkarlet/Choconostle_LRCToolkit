@@ -399,7 +399,7 @@ def test_compact_clean_backups_and_fix_gallery(tmp_path):
     assert "Resumen: " in result.output and "Tiempo total: " in result.output and "Respaldos en:" in result.output
 
 
-@pytest.mark.parametrize("width", [40, 69])
+@pytest.mark.parametrize("width", [45, 69])
 def test_compact_progress_is_one_short_line(width):
     import io
     import re
@@ -419,7 +419,7 @@ def test_compact_progress_is_one_short_line(width):
     frames = [frame.rstrip() for frame in frames if frame.strip()]
     assert frames
     for frame in frames:
-        assert "\n" not in frame and len(frame) <= 40, repr(frame)
+        assert "\n" not in frame and len(frame) <= 45, repr(frame)
         assert "/340 · 0:00:0" in frame and "restante" not in frame and "muy largo" not in frame and "x.flac" not in frame
 
 

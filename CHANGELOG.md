@@ -10,6 +10,9 @@ Versión de desarrollo `1.0.0rc3.dev0` en `pyproject.toml` y `config.py`. No hay
 ### Corregido
 - `scan`: la fila de instrumentales salía como «Instrumentales ()» porque `[instrumental:true]` se interpretaba como marcado de rich. Ahora dice «Instrumentales (se conservan)», como en `normalize-lyrics`.
 
+### Cambiado (barra con número de fase)
+- `normalize-lyrics` y `convert-lyrics` con `--apply` muestran la fase en la barra: «Paso 1/2 · Planificando 120/3393 · 0:01:10» y «Paso 2/2 · Aplicando 40/1981 · 0:03:10» (también al reanudar con `--resume`), para que al empezar la segunda no parezca que reinició. En la simulación solo hay una fase y la barra dice «Planificando». La línea compacta mide unos 42 caracteres.
+
 ### Cambiado (commit 6: versión)
 - Versión `1.0.0rc3.dev0` en `pyproject.toml` y `src/choconostle/config.py`.
 - Además: `docs/LIMPIEZA.md` (commit 5) lista el código y los archivos que parecen sin uso y lo que conviene conservar. No se borró nada.

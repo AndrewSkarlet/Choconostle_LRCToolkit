@@ -528,6 +528,7 @@ def _execute(command, processor, path, apply, diff, limit, only, include_hidden,
     keep_folder = apply
     resume_hint = f'choconostle {command} "{path}" --resume "{execution.folder}"'
     try:
+        progress.phases = 2 if apply else 1  # en la simulación solo se planifica
         progress.start_plan(count_files(path, include_hidden))
         try:
             totals = runs.plan_library(execution, processor, path, only, include_hidden, progress)
@@ -727,6 +728,8 @@ class _RunProgress:
         self.progress = None
         self.task = None
         self._description = ""
+        self.phases = 1
+        """2 con --apply en normalize-lyrics y convert-lyrics (planificar y aplicar): la barra dice «Paso N/2»."""
 
     def _start(self, description: str, total: int | None, completed: int = 0) -> None:
         self.stop()
@@ -738,7 +741,7 @@ class _RunProgress:
         self.task = self.progress.add_task(description, total=total, completed=completed, name="")
 
     def start_plan(self, total: int) -> None:
-        self._start("Planificando", total)
+        self._start("Paso 1/2 · Planificando" if self.phases == 2 else "Planificando", total)
 
     # Interfaz genérica (revert, comprobación de --resume, clean-backups).
     def start(self, description: str, total: int | None, completed: int = 0) -> None:
@@ -760,7 +763,8 @@ class _RunProgress:
                                  name=_file_name(current) if current else "")
 
     def start_apply(self, total: int, completed: int = 0) -> None:
-        self._start("Aplicando", total, completed)
+        # Aplicar siempre es la segunda fase (también al reanudar con --resume).
+        self._start("Paso 2/2 · Aplicando", total, completed)
 
     def advance(self, totals) -> None:
         if self.progress is not None:

@@ -170,3 +170,41 @@ def test_no_question_with_no_input_export_apply_or_without_terminal(tmp_path, in
     result = runner.invoke(app, [*base, "--apply"], input="s\n\n")
     assert result.exit_code == 0 and "¿Guardar" not in result.output
     assert not interactive.exists()
+
+
+# --------------------------------------------------------------------------
+# Fases (Paso 1/2, Paso 2/2) y el indicador al llegar a N/N
+# --------------------------------------------------------------------------
+
+def _frames(compact, phases, steps):
+    buffer = io.StringIO()
+    progress = cli._RunProgress(Console(file=buffer, force_terminal=True, width=100, color_system=None),
+                                enabled=True, compact=compact)
+    progress.phases = phases
+    for start, total in steps:
+        getattr(progress, start)(total)
+        progress.tick(total, "x.lrc")
+        progress.progress.refresh()
+    progress.stop()
+    return frames_of(buffer)
+
+
+@pytest.mark.parametrize("compact", [False, True])
+def test_two_phases_show_step_number(compact):
+    frames = _frames(compact, 2, [("start_plan", 3393), ("start_apply", 1981)])
+    assert any(re.search(r"Paso 1/2 · Planificando 3393/3393 · 0:00:0\d", frame) for frame in frames), frames
+    assert any(re.search(r"Paso 2/2 · Aplicando 1981/1981 · 0:00:0\d", frame) for frame in frames), frames
+    # Simulación: solo se planifica, sin «Paso 1/2».
+    frames = _frames(compact, 1, [("start_plan", 10)])
+    assert any("Planificando 10/10" in frame for frame in frames) and not any("Paso" in f for f in frames)
+
+
+def test_execute_sets_two_phases_only_with_apply(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli._RunProgress, "start_plan", lambda self, total: seen.append(self.phases))
+    library = _library(tmp_path)
+    for extra, phases in (([], 1), (["--apply"], 2)):
+        result = runner.invoke(app, ["normalize-lyrics", str(library), "--strip-headers", "--no-progress",
+                                     "--no-input", *extra])
+        assert result.exit_code == 0, result.output
+        assert seen[-1] == phases
