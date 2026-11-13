@@ -131,7 +131,7 @@ def test_scan_counts_instrumentals(tmp_path):
     result = runner.invoke(app, ["scan", str(lib), "--json", str(output), "--no-progress"],
                            env={"COLUMNS": "200"})
     assert result.exit_code == 0, result.output
-    assert "Instrumentales" in result.output
+    assert "Instrumentales (se conservan)" in result.output and "Instrumentales ()" not in result.output
     report = json.loads(output.read_text(encoding="utf-8"))
     assert report["lyrics_issues"]["instrumental"] == 1
     assert not any(item["location"].endswith("04.lrc") for item in report["lyrics_nearly_empty"])

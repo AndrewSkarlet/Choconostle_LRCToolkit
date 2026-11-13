@@ -427,7 +427,7 @@ def print_report(report: dict, console: Console | None = None, limit: int = 20) 
     table.add_row("Sin letra", f"{summary['lyrics_none']} ({percent(summary['lyrics_none'], total)})")
     instrumental = report["lyrics_issues"].get("instrumental", 0)
     if instrumental:
-        table.add_row("Instrumentales ([instrumental:true])", str(instrumental))
+        table.add_row("Instrumentales (se conservan)", str(instrumental))
     console.print(table)
 
     found = report["lyrics_found"]

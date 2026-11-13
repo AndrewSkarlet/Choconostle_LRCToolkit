@@ -7,6 +7,9 @@ Versión de desarrollo `1.0.0rc3.dev0` en `pyproject.toml` y `config.py`. No hay
 ### Quitado (tras la prueba de la rama: 600/600 en Windows y tres teléfonos)
 - Código sin uso según `docs/LIMPIEZA.md`: `rename.py` (vacío), `backup.BackupSession` (creación de respaldos con `manifiesto.json` de la 0.3.0) con `_safe_name`, `_relative`, `_jsonable` y las constantes e imports que solo usaba, `run.ResumeError`, `normalizer.ENCODING_UTF8`, `normalizer.ENCODING_UTF8_BOM` y `textio._EOL_BYTES_RE`. Se conservan `join_lines`, `skipped_by_reason`, `legacy_embedded.py`, la lectura de `manifiesto.json` y `tools/`.
 
+### Corregido
+- `scan`: la fila de instrumentales salía como «Instrumentales ()» porque `[instrumental:true]` se interpretaba como marcado de rich. Ahora dice «Instrumentales (se conservan)», como en `normalize-lyrics`.
+
 ### Cambiado (commit 6: versión)
 - Versión `1.0.0rc3.dev0` en `pyproject.toml` y `src/choconostle/config.py`.
 - Además: `docs/LIMPIEZA.md` (commit 5) lista el código y los archivos que parecen sin uso y lo que conviene conservar. No se borró nada.
