@@ -208,3 +208,22 @@ def test_execute_sets_two_phases_only_with_apply(tmp_path, monkeypatch):
                                      "--no-input", *extra])
         assert result.exit_code == 0, result.output
         assert seen[-1] == phases
+
+
+@pytest.mark.parametrize("compact", [False, True])
+def test_spinner_keeps_spinning_at_the_end(compact):
+    """Antes, al llegar a N/N el indicador se cambiaba por un espacio (parecía que se saltaba un fotograma)."""
+    import time
+    buffer = io.StringIO()
+    progress = cli._RunProgress(Console(file=buffer, force_terminal=True, width=80, color_system=None),
+                                enabled=True, compact=compact)
+    progress.start_apply(5)
+    progress.applied(None)
+    progress.progress.update(progress.task, completed=5)
+    for _ in range(3):
+        time.sleep(0.09)
+        progress.progress.refresh()
+    progress.stop()
+    finished = [frame for frame in frames_of(buffer) if "5/5" in frame]
+    assert finished and all(not frame[0].isspace() for frame in finished), finished
+    assert len({frame[0] for frame in finished}) > 1  # sigue animado

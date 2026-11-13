@@ -696,6 +696,19 @@ def _resume(path, folder, console, error_console, progress, show_limit, diff,
         _log_elapsed(execution.folder, "reanudación")
 
 
+class _Spinner(SpinnerColumn):
+    """
+    Indicador que sigue animado al llegar a N/N. SpinnerColumn de rich lo
+    cambia por un espacio en cuanto la tarea está completa; en la
+    planificación eso pasa al empezar el último archivo (aún trabajando), y
+    el indicador desaparecía un momento antes de cerrar la barra: parecía
+    que la animación se saltaba un fotograma o se congelaba.
+    """
+
+    def render(self, task):
+        return self.spinner.render(task.get_time())
+
+
 def _bar(console: Console, compact: bool) -> Progress:
     """
     Formato común de todas las barras: indicador animado, nombre del paso,
@@ -703,7 +716,7 @@ def _bar(console: Console, compact: bool) -> Progress:
     completa se añade el nombre del archivo en curso, recortado con «…» al
     ancho de la terminal; en la compacta, no.
     """
-    columns = [SpinnerColumn(), TextColumn("{task.description}"), MofNCompleteColumn(), TextColumn("·"),
+    columns = [_Spinner(), TextColumn("{task.description}"), MofNCompleteColumn(), TextColumn("·"),
                TimeElapsedColumn()]
     if not compact:
         # expand=True: cada actualización ocupa el ancho completo (rellena con
