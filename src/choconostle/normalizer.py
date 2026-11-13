@@ -49,8 +49,6 @@ MODE_STRIP = "strip"
 MODE_STANDARDIZE = "standardize"
 
 ENCODING_KEEP = "keep"
-ENCODING_UTF8 = "utf8"
-ENCODING_UTF8_BOM = "utf8-bom"
 
 OFFSET_SKIP = "skip"
 OFFSET_FIRST = "first"

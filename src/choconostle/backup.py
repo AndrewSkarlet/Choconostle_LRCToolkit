@@ -25,7 +25,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -34,22 +33,19 @@ from choconostle.config import APP_NAME, APP_VERSION, BACKUP_DIR_NAME
 from choconostle.embedded import open_editor
 from choconostle.legacy_embedded import EmbeddedError, EmbeddedLyrics
 from choconostle.rawtags import (
-    MODE_FULL, Edit, Unsupported, apply_patches, invert_patches, patches_from_json, patches_to_json,
+    MODE_FULL, Edit, Unsupported, apply_patches, invert_patches, patches_from_json,
 )
 from choconostle.rawtags.ogg import OggEditor
 from choconostle.rawtags.writer import (
     RECOVERED_COMPLETE, RECOVERED_FAILED, VERIFY_AUTO, ChangedError, Journal, RestoreError, WriteError,
     effective_verify, file_sha256, file_signature, recover, rewrite_with, write_edit,
 )
-from choconostle.textio import diff_lines
 from choconostle.utils import write_file_atomic
 
 MANIFEST_NAME = "manifiesto.json"
 LOG_NAME = "registro.txt"
 ORIGINALS_DIR = "originales"
-MANIFEST_VERSION = 2
 
-ITEM_PENDING = "pending"
 ITEM_APPLIED = "applied"
 ITEM_FAILED = "failed"
 
@@ -58,195 +54,15 @@ REVERT_ALREADY = "already"
 REVERT_CONFLICT = "conflict"
 REVERT_ERROR = "error"
 
-_UNSAFE_NAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-
 
 def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
-
-
-def _safe_name(name: str, limit: int = 80) -> str:
-    """Nombre de archivo válido en Windows, Linux y Android."""
-    name = _UNSAFE_NAME_RE.sub("_", name).strip(" .") or "letra"
-    return name[:limit]
-
-
-def _relative(path: Path, root: Path) -> str:
-    try:
-        return path.relative_to(root).as_posix()
-    except ValueError:
-        return str(path)
-
-
-def _jsonable(value):
-    """SYLT: lista de tuplas -> lista de listas."""
-    if isinstance(value, list):
-        return [[text, time] for text, time in value]
-    return value
 
 
 def _python_value(value):
     if isinstance(value, list):
         return [(text, time) for text, time in value]
     return value
-
-
-def _diff(original: str, new: str) -> list[str]:
-    """Diferencias por línea; los caracteres invisibles se ven como ⟨U+200B⟩."""
-    return diff_lines(original, new)
-
-
-# --------------------------------------------------------------------------
-# Creación del respaldo
-# --------------------------------------------------------------------------
-
-class BackupSession:
-    """Una carpeta de respaldo para una ejecución de normalize-lyrics."""
-
-    def __init__(self, root: Path, mode: str, encoding: str, now: datetime | None = None):
-        self.root = Path(root)
-        now = now or datetime.now()
-        base = self.root / BACKUP_DIR_NAME
-        name = now.strftime("%Y-%m-%d_%H-%M-%S")
-        folder = base / name
-        counter = 2
-        while folder.exists():
-            folder = base / f"{name}_{counter}"
-            counter += 1
-        self.folder = folder
-        (folder / ORIGINALS_DIR).mkdir(parents=True)
-        self.manifest = {
-            "app": APP_NAME,
-            "app_version": APP_VERSION,
-            "manifest_version": MANIFEST_VERSION,
-            "created_at": now.isoformat(timespec="seconds"),
-            "root": str(self.root),
-            "mode": mode,
-            "encoding": encoding,
-            "items": [],
-            "edits": [],
-        }
-        self._changes: list = []
-
-    def add(self, change) -> dict:
-        """Guarda el original de un cambio y lo registra en el manifiesto."""
-        number = len(self.manifest["items"]) + 1
-        item = {
-            "id": number,
-            "kind": change.kind,
-            "path": _relative(change.path, self.root),
-            "track": _relative(change.track_path, self.root) if change.track_path else None,
-            "label": change.label,
-            "details": list(change.details),
-            "status": ITEM_PENDING,
-            "error": None,
-        }
-        if change.kind == "file":
-            copy_name = f"{number:04d} - {_safe_name(change.path.name)}"
-            (self.folder / ORIGINALS_DIR / copy_name).write_bytes(change.original_bytes)
-            item.update({
-                "original_copy": f"{ORIGINALS_DIR}/{copy_name}",
-                "original_sha256": sha256(change.original_bytes),
-                "new_sha256": sha256(change.new_bytes),
-                "original_mtime": change.original_mtime,
-            })
-        else:
-            copy_name = f"{number:04d} - {_safe_name(change.path.name)} [{_safe_name(change.label, 40)}].txt"
-            (self.folder / ORIGINALS_DIR / copy_name).write_text(
-                change.original_text, encoding="utf-8", newline="")
-            item.update({
-                "original_copy": f"{ORIGINALS_DIR}/{copy_name}",
-                "slot": change.slot.ref(),
-                "original_value": _jsonable(change.original_value),
-                "new_value": _jsonable(change.new_value),
-                "original_id3_encoding": change.slot.id3_encoding,
-            })
-        self.manifest["items"].append(item)
-        self._changes.append(change)
-        return item
-
-    def add_edit(self, path: Path, editor, edit: Edit, items: list[dict], signature) -> dict:
-        """
-        Registra la edición byte a byte de un archivo de audio y guarda sus
-        parches (bytes originales de la letra, tamaños y relleno).
-        """
-        number = len(self.manifest["edits"]) + 1
-        is_ogg = isinstance(editor, OggEditor)
-        record = {
-            "id": number,
-            "path": _relative(Path(path), self.root),
-            "format": editor.tag_format,
-            "writer": "mutagen-ogg" if is_ogg else "raw",
-            "mode": edit.mode,
-            "signature": list(signature),
-            "items": [item["id"] for item in items],
-            "status": ITEM_PENDING,
-            "error": None,
-        }
-        if not is_ogg:
-            patch_name = f"edit-{number:04d} - {_safe_name(Path(path).name)}.json"
-            data = {"start": editor.start, "old_len": edit.old_len, "new_len": edit.new_len,
-                    "patches": patches_to_json(edit.patches)}
-            (self.folder / ORIGINALS_DIR / patch_name).write_text(json.dumps(data), encoding="utf-8")
-            record["patches"] = f"{ORIGINALS_DIR}/{patch_name}"
-            new_region = apply_patches(editor.region, edit.patches)
-            # Hashes y tamaños esperados, guardados antes de escribir: si la
-            # escritura se interrumpe, revert y recover los necesitan.
-            record.update({
-                "start": editor.start, "old_len": edit.old_len, "new_len": edit.new_len,
-                "old_sha": sha256(editor.region), "new_sha": sha256(new_region),
-                "size_before": signature[0], "size_after": signature[0] + edit.new_len - edit.old_len,
-            })
-        for item in items:
-            item["edit"] = number
-        self.manifest["edits"].append(record)
-        return record
-
-    def save_manifest(self) -> None:
-        path = self.folder / MANIFEST_NAME
-        temporary = path.with_name(path.name + ".tmp")
-        with open(temporary, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(self.manifest, ensure_ascii=False, indent=2))
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-
-    def write_log(self) -> None:
-        mode_names = {"strip": "quitar cabeceras (--strip-headers)",
-                      "standardize": "estandarizar cabeceras (--standardize-headers)"}
-        status_names = {ITEM_APPLIED: "aplicado", ITEM_FAILED: "FALLÓ", ITEM_PENDING: "pendiente"}
-        lines = [
-            f"{APP_NAME} {APP_VERSION} - normalize-lyrics",
-            f"Fecha: {self.manifest['created_at']}",
-            f"Biblioteca: {self.root}",
-            f"Modo: {mode_names.get(self.manifest['mode'], self.manifest['mode'])}",
-            f"Codificación de archivos .lrc/.txt: {self.manifest['encoding']}",
-            f"Letras modificadas: {sum(1 for i in self.manifest['items'] if i['status'] == ITEM_APPLIED)}"
-            f" de {len(self.manifest['items'])}",
-            "",
-            f"Para deshacer: choconostle revert \"{self.folder}\"",
-            "",
-        ]
-        for item, change in zip(self.manifest["items"], self._changes):
-            kind = "archivo" if item["kind"] == "file" else f"incrustada {item['label']}"
-            lines.append("=" * 72)
-            lines.append(f"[{item['id']:04d}] {item['path']}  ({kind})")
-            if item["track"] and item["track"] != item["path"]:
-                lines.append(f"  Canción: {item['track']}")
-            lines.append(f"  Cambios: {'; '.join(item['details']) or '-'}")
-            if getattr(change, "source_encoding", None):
-                lines.append(f"  Codificación de origen: {change.source_encoding}")
-            for warning in getattr(change, "warnings", []):
-                lines.append(f"  Aviso: {warning}")
-            if getattr(change, "approximate", False):
-                lines.append("  Vista aproximada: la codificación de origen no se pudo confirmar; "
-                             "el archivo se modifica byte a byte sin depender de ella.")
-            lines.append(f"  Estado: {status_names.get(item['status'], item['status'])}"
-                         + (f" ({item['error']})" if item["error"] else ""))
-            lines.append(f"  Original guardado en: {item['original_copy']}")
-            lines.extend("  " + line for line in _diff(change.original_text, change.new_text))
-        lines.append("")
-        (self.folder / LOG_NAME).write_text("\n".join(lines), encoding="utf-8")
 
 
 # --------------------------------------------------------------------------

@@ -38,6 +38,6 @@ Lo que no se hizo o no se probó hasta la versión 1.0.0rc3.dev0 (en desarrollo;
 
 ## Fuera de la rc3.dev0
 
-- **Organizador de carpetas (acomodador de biblioteca):** renombrar y ordenar carpetas y archivos; saldrá con la rc3. `src/choconostle/rename.py` está vacío (ver `docs/LIMPIEZA.md`).
+- **Organizador de carpetas (acomodador de biblioteca):** renombrar y ordenar carpetas y archivos; saldrá con la rc3. Aún no hay código (el `rename.py` vacío se borró; ver `docs/LIMPIEZA.md`).
 - **README completo en inglés y mensajes del programa traducidos** (solo hay un README corto, `README.en.md`).
 - **Rendimiento en tarjetas lentas:** cada escritura sincroniza el respaldo, el diario y el archivo (fsync), y en tarjetas SD lentas ese coste domina el tiempo total. En una SD de 4 GB (FAT32, USB 2.0), una escritura con sincronización cuesta unos 19 ms por archivo, frente a 1 ms en el disco interno; con 42 archivos, `revert` tardó 21-22 s y `--apply` 25 s. Reducirlo exige agrupar sincronizaciones sin perder la capacidad de reanudar.

@@ -123,14 +123,6 @@ class StopRun(Exception):
         super().__init__(message)
 
 
-class ResumeError(Exception):
-    """--resume no puede continuar con seguridad."""
-
-    def __init__(self, problems: list[str]):
-        self.problems = problems
-        super().__init__("; ".join(problems))
-
-
 # --------------------------------------------------------------------------
 # Utilidades
 # --------------------------------------------------------------------------

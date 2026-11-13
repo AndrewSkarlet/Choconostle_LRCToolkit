@@ -34,7 +34,6 @@ from dataclasses import dataclass, field
 INVISIBLE_PREFIX_CHARS = "​﻿‎‏⁠"
 
 _EOL_RE = re.compile(r"\r\n|\r|\n")
-_EOL_BYTES_RE = re.compile(rb"\r\n|\r|\n")
 
 # El orden importa: el BOM de UTF-32 LE empieza igual que el de UTF-16 LE.
 BOMS = [
