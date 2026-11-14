@@ -227,3 +227,47 @@ def test_spinner_keeps_spinning_at_the_end(compact):
     finished = [frame for frame in frames_of(buffer) if "5/5" in frame]
     assert finished and all(not frame[0].isspace() for frame in finished), finished
     assert len({frame[0] for frame in finished}) > 1  # sigue animado
+
+
+# --------------------------------------------------------------------------
+# Total de la planificación con --only
+# --------------------------------------------------------------------------
+
+def _library_two_folders(tmp_path):
+    library = tmp_path / "lib"
+    for folder, count in (("a", 2), ("b", 3)):
+        for index in range(1, count + 1):
+            make_flac(library / folder / f"{index:02d}.flac", tags={"TITLE": f"{folder}{index}", "ALBUM": f"Disco {folder.upper()}"})
+            (library / folder / f"{index:02d}.lrc").write_text("[ar:x]\n[00:01.00]a\n[00:02.00]b\n[00:03.00]c\n",
+                                                               encoding="utf-8")
+    return library
+
+
+@pytest.mark.parametrize("only,expected", [([], 10), (["a"], 4), (["b"], 6), (["a", "b"], 10),
+                                           (["Disco A"], 10)])  # un álbum: se recorre toda la biblioteca
+def test_plan_total_with_only_matches_files_seen(tmp_path, only, expected):
+    from choconostle import run as runs
+    from choconostle.normalizer import MODE_STRIP, LyricsNormalizer
+    library = _library_two_folders(tmp_path)
+    assert runs.plan_file_count(library, only) == expected
+
+    class Seen:
+        files = 0
+
+        def advance(self, totals):
+            Seen.files = totals.files_seen
+    normalizer = LyricsNormalizer(MODE_STRIP)
+    execution = runs.Run.create(library, "normalize-lyrics", dict(normalizer.options(), verify="auto"),
+                                temporary=True)
+    runs.plan_library(execution, normalizer, library, only, progress=Seen())
+    assert Seen.files == expected  # la barra llega exactamente a M
+
+
+def test_cli_plan_bar_total_with_only(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(cli._RunProgress, "start_plan", lambda self, total: seen.append(total))
+    library = _library_two_folders(tmp_path)
+    result = runner.invoke(app, ["normalize-lyrics", str(library), "--strip-headers", "--no-progress",
+                                 "--no-input", "--only", "b"])
+    assert result.exit_code == 0, result.output
+    assert seen == [6]

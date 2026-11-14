@@ -529,7 +529,9 @@ def _execute(command, processor, path, apply, diff, limit, only, include_hidden,
     resume_hint = f'choconostle {command} "{path}" --resume "{execution.folder}"'
     try:
         progress.phases = 2 if apply else 1  # en la simulación solo se planifica
-        progress.start_plan(count_files(path, include_hidden))
+        # Con --only de carpetas, el total cuenta solo esas carpetas (antes, toda la biblioteca,
+        # y la barra se cerraba antes de llegar a M).
+        progress.start_plan(runs.plan_file_count(path, only, include_hidden))
         try:
             totals = runs.plan_library(execution, processor, path, only, include_hidden, progress)
         except runs.StopRun as stop:

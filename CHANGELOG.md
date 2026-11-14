@@ -16,6 +16,9 @@ Versión de desarrollo `1.0.0rc3.dev0` en `pyproject.toml` y `config.py`. No hay
 ### Corregido (indicador al final de la barra)
 - Al llegar a N/N, rich cambiaba el indicador animado por un espacio. En la planificación el contador llega a N/N al empezar el último archivo, todavía trabajando, así que el indicador desaparecía justo antes de cerrar la barra y parecía que la animación se saltaba un fotograma o se congelaba. Ahora sigue animado hasta que la barra se cierra, en todas las barras y en las dos vistas.
 
+### Corregido (total de la planificación con `--only`)
+- Con `--only CARPETA`, el total de la barra «Planificando N/M» contaba los archivos de toda la biblioteca, y la barra se cerraba antes de llegar a M. Ahora cuenta solo las carpetas seleccionadas, con el mismo recorrido que la planificación (`run.plan_walk`). Con `--only ÁLBUM` (nombre de etiqueta) se sigue contando toda la biblioteca, porque para encontrar el álbum hay que leerla entera. Prueba en `tests/test_interfaz.py`: el total coincide con los archivos que ve la planificación.
+
 ### Cambiado (commit 6: versión)
 - Versión `1.0.0rc3.dev0` en `pyproject.toml` y `src/choconostle/config.py`.
 - Además: `docs/LIMPIEZA.md` (commit 5) lista el código y los archivos que parecen sin uso y lo que conviene conservar. No se borró nada.

@@ -55,7 +55,7 @@ from choconostle.rawtags.writer import (
     TEMP_SUFFIX, VERIFY_AUTO, VERIFY_FULL, ChangedError, Journal, RestoreError, WriteError, file_sha256,
     effective_verify, file_signature, read_at, recover, rewrite_with, write_edit,
 )
-from choconostle.scanner import iter_folders
+from choconostle.scanner import count_files, iter_folders
 from choconostle.textio import diff_lines
 from choconostle.utils import format_size, fsync_file, long_path, plural, write_file_atomic
 
@@ -634,6 +634,21 @@ def resolve_only(root: Path, only: list[str]) -> tuple[list[Path], set[str]]:
     return folders, albums
 
 
+def plan_walk(root: Path, only: list[str] | None) -> list[Path] | None:
+    """
+    Carpetas que recorre la planificación: las de --only si todas son
+    carpetas; None (toda la biblioteca) sin --only o si alguna es un álbum
+    (los álbumes se reconocen por las etiquetas, así que hay que leerlo todo).
+    """
+    folders, albums = resolve_only(Path(root), only or [])
+    return None if albums else (folders or None)
+
+
+def plan_file_count(root: Path, only: list[str] | None = None, include_hidden: bool = False) -> int:
+    """Total de archivos que verá la planificación (para la barra «N/M»), con el mismo recorrido."""
+    return count_files(Path(root), include_hidden, folders=plan_walk(root, only))
+
+
 def plan_library(run: Run, normalizer, root: Path, only: list[str] | None = None,
                  include_hidden: bool = False, progress=None, with_diff: bool = True) -> Totals:
     """
@@ -643,7 +658,7 @@ def plan_library(run: Run, normalizer, root: Path, only: list[str] | None = None
     """
     root = Path(root)
     folders, albums = resolve_only(root, only or [])
-    walk = None if albums else (folders or None)
+    walk = plan_walk(root, only)
     builder = RecordBuilder(root, with_diff)
     totals = Totals()
     found_albums: set[str] = set()
