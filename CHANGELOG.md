@@ -19,6 +19,15 @@ Versión de desarrollo `1.0.0rc3.dev0` en `pyproject.toml` y `config.py`. No hay
 ### Corregido (total de la planificación con `--only`)
 - Con `--only CARPETA`, el total de la barra «Planificando N/M» contaba los archivos de toda la biblioteca, y la barra se cerraba antes de llegar a M. Ahora cuenta solo las carpetas seleccionadas, con el mismo recorrido que la planificación (`run.plan_walk`). Con `--only ÁLBUM` (nombre de etiqueta) se sigue contando toda la biblioteca, porque para encontrar el álbum hay que leerla entera. Prueba en `tests/test_interfaz.py`: el total coincide con los archivos que ve la planificación.
 
+### Quitado (soporte de versiones no públicas)
+- Las versiones anteriores a la 0.3.0 nunca fueron públicas: se quitó `legacy_embedded.py` y la lectura de `manifiesto.json` v1 y v2 en `revert`, `recover` y `clean-backups` (unas 390 líneas). Los respaldos de formato 3 (0.3.0, 1.0.0rc1 y 1.0.0rc2) y `--resume` de planes de la rc1 sin huella del audio no cambian.
+- `revert` y `recover` con una carpeta antigua (`manifiesto.json`) responden «No se encontró estado.json» (código 2).
+- `clean-backups` lista las carpetas de `ChoconostleLRCTool_back` que no reconoce (por ejemplo, las antiguas con `manifiesto.json`) con su ruta, el motivo y una nota de que se pueden borrar a mano, en las dos vistas. Nunca las borra.
+
+### Cambiado (textos)
+- Comentarios y docstrings del código y de las pruebas sin referencias a fases, etapas, peticiones ni versiones de desarrollo: solo qué hace cada cosa. Sin cambios de lógica ni de mensajes en pantalla. La historia queda en este archivo y en `docs/`.
+- `README.md`: sin `legacy_embedded.py` ni la mención a los manifiestos v1/v2. `README.en.md`: enlace a «Normalizar letras» corregido. `tests/COBERTURA.md`: sin marcas de etapa; la historia de los cambios que salieron de esas pruebas está en la v0.3.0 de este archivo.
+
 ### Cambiado (commit 6: versión)
 - Versión `1.0.0rc3.dev0` en `pyproject.toml` y `src/choconostle/config.py`.
 - Además: `docs/LIMPIEZA.md` (commit 5) lista el código y los archivos que parecen sin uso y lo que conviene conservar. No se borró nada.
