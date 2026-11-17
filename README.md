@@ -2,7 +2,7 @@
 
 [English version](README.en.md)
 
-> ⚠️ **Versión candidata (1.0.0rc1), no estable.** Antes de usar `--apply`, haz una copia de tu biblioteca y ejecuta siempre primero la simulación (el mismo comando sin `--apply`). La herramienta guarda respaldos de lo que modifica, pero una copia propia es la única protección ante cualquier imprevisto. Qué se probó y qué no: [docs/PENDIENTES.md](docs/PENDIENTES.md).
+> ⚠️ **Versión candidata, no estable.** Antes de usar `--apply`, haz una copia de tu biblioteca y ejecuta siempre primero la simulación (el mismo comando sin `--apply`). La herramienta guarda respaldos de lo que modifica, pero una copia propia es la única protección ante cualquier imprevisto. Qué se probó y qué no: [docs/PENDIENTES.md](docs/PENDIENTES.md).
 
 Toolkit para analizar, reparar y organizar bibliotecas musicales con archivos LRC.
 

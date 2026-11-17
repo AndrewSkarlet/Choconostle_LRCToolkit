@@ -2,7 +2,7 @@
 
 [Versión en español](README.md)
 
-> **⚠️ Before using `--apply`, make a copy of your music library.** Always run the simulation first (the same command without `--apply`) and review what would change. The tool keeps backups of what it modifies, but your own copy is the only protection against the unexpected.
+> ⚠️ **Release candidate, not stable yet.** Before using `--apply`, make a copy of your music library. Always run the simulation first (the same command without `--apply`) and review what would change. The tool keeps backups of what it modifies, but your own copy is the only protection against the unexpected.
 
 Choconostle analyzes, repairs and organizes music libraries that use LRC lyrics files: it reports formats, lyrics, albums and covers, cleans up lyric headers, converts lyric encodings and hides cover images from gallery apps.
 
