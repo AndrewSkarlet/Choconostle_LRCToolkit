@@ -162,7 +162,7 @@ def check_fingerprint(path: Path, fingerprint: dict | None, start: int, length: 
 
     `known` son hashes ya calculados ({"sample": ...} o {"sha256": ...}) sobre
     exactamente los mismos bytes [start, start + length); se reutilizan para no
-    volver a leer. Planes sin huella (rc1): no se comprueba nada aquí.
+    volver a leer. Planes sin huella (creados con la 1.0.0rc1): no se comprueba nada aquí.
     """
     if not fingerprint:
         return

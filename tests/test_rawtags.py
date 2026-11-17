@@ -1,5 +1,5 @@
 """
-Pruebas de la edición byte a byte (etapa ②).
+Pruebas de la edición byte a byte de las letras incrustadas.
 
 Los archivos se crean con las funciones de tools/generar_casos.py (ver
 tools/CASOS.md) en carpetas temporales.

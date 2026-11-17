@@ -1,5 +1,5 @@
 """
-Lo que antes salía como «desconocido» en normalize-lyrics (rc3):
+Líneas con forma de cabecera que no son cabeceras desconocidas:
 
 a) etiquetas de sección estilo Genius ([Intro: Artista], [Chorus], [Verso 2]):
    son letra, nunca se listan ni se quitan;

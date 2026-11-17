@@ -529,8 +529,7 @@ def _execute(command, processor, path, apply, diff, limit, only, include_hidden,
     resume_hint = f'choconostle {command} "{path}" --resume "{execution.folder}"'
     try:
         progress.phases = 2 if apply else 1  # en la simulación solo se planifica
-        # Con --only de carpetas, el total cuenta solo esas carpetas (antes, toda la biblioteca,
-        # y la barra se cerraba antes de llegar a M).
+        # El total usa el mismo recorrido que la planificación: con --only de carpetas, solo esas.
         progress.start_plan(runs.plan_file_count(path, only, include_hidden))
         try:
             totals = runs.plan_library(execution, processor, path, only, include_hidden, progress)
@@ -700,11 +699,10 @@ def _resume(path, folder, console, error_console, progress, show_limit, diff,
 
 class _Spinner(SpinnerColumn):
     """
-    Indicador que sigue animado al llegar a N/N. SpinnerColumn de rich lo
-    cambia por un espacio en cuanto la tarea está completa; en la
-    planificación eso pasa al empezar el último archivo (aún trabajando), y
-    el indicador desaparecía un momento antes de cerrar la barra: parecía
-    que la animación se saltaba un fotograma o se congelaba.
+    Indicador que sigue animado al llegar a N/N, hasta que se cierra la barra.
+    SpinnerColumn de rich lo cambia por un espacio en cuanto la tarea está
+    completa, y en la planificación eso pasa al empezar el último archivo,
+    cuando todavía se está trabajando.
     """
 
     def render(self, task):

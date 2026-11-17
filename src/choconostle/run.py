@@ -345,8 +345,8 @@ class Run:
     def legacy_audio_plans(self) -> int:
         """
         Archivos de audio por modificar cuyo plan no tiene huella del audio
-        (planes de la rc1): al aplicarlos solo se comparan tamaño, fecha y
-        bytes de las etiquetas.
+        (planes creados con la 1.0.0rc1): al aplicarlos solo se comparan
+        tamaño, fecha y bytes de las etiquetas.
         """
         return sum(1 for record in self.plan_records()
                    if record.get("status") == "change" and record.get("plan")
@@ -388,8 +388,8 @@ class Run:
         ({id: evento intent}, {id: evento done}) (el último de cada uno).
 
         En memoria solo quedan las posiciones de cada evento en el diario;
-        el evento se lee del disco cuando se pide (etapa ⑥: con miles de
-        entradas, los eventos enteros ocupaban unos 2 KB por entrada).
+        el evento se lee del disco cuando se pide, así la memoria no crece
+        con el número de entradas.
         """
         path = self.folder / DIARY_NAME
         intents, done = {}, {}
@@ -1259,8 +1259,8 @@ def revert_run(folder: Path, force: bool = False, dry_run: bool = False, progres
             new = _revert_record(run, root, record, intents, done, force, dry_run)
             _progress_call(progress, "tick", 1, "")
             for result in new:
-                # Solo lo que usan el registro y la consola: la letra original
-                # ocupaba en memoria hasta terminar (etapa ⑥).
+                # Solo lo que usan el registro y la consola: así la letra original
+                # no se queda en memoria hasta terminar.
                 result.item = {key: result.item[key] for key in REVERT_ITEM_KEYS if key in result.item}
             results += new
             for result in new:

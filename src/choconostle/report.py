@@ -640,7 +640,7 @@ def print_run_report(
     Con `compact` (terminales estrechas) no se listan los cambios: solo los
     errores completos y el bloque final (resumen, tiempo total, respaldo y
     siguiente acción), que también sale en la vista completa. `export` es
-    el archivo donde ya se guardó la lista completa (--export), si se pidió.
+    el archivo donde ya se guardó la lista completa con --export, o None.
     """
     from choconostle.normalizer import MODE_STRIP, skip_reason_label
 

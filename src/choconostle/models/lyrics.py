@@ -58,7 +58,7 @@ class LyricsInfo:
 
     @property
     def needs_fix(self) -> bool:
-        """True si la Fase 2 debería corregir esta letra."""
+        """True si normalize-lyrics o convert-lyrics pueden corregir esta letra (cabeceras, BOM o no UTF-8)."""
         return self.has_headers or self.has_bom or not self.is_utf8
 
     def to_dict(self) -> dict:

@@ -1,5 +1,5 @@
 """
-Letras sospechosas (rc3): solo se informa, nunca se modifica nada.
+Letras sospechosas: solo se informa, nunca se modifica nada.
 
 Casos generados: letras con URL o dominio, el mismo texto en muchas
 canciones (con títulos de remixes para distinguir versiones de publicidad),

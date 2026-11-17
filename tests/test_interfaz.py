@@ -1,5 +1,5 @@
 """
-Interfaz (rc3): formato común de las barras, indicador de --export y la
+Interfaz: formato común de las barras, indicador de --export y la
 pregunta «¿Guardar la lista completa?» al terminar una simulación.
 """
 
@@ -212,7 +212,7 @@ def test_execute_sets_two_phases_only_with_apply(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("compact", [False, True])
 def test_spinner_keeps_spinning_at_the_end(compact):
-    """Antes, al llegar a N/N el indicador se cambiaba por un espacio (parecía que se saltaba un fotograma)."""
+    """Al llegar a N/N el indicador sigue animado (rich lo cambiaría por un espacio)."""
     import time
     buffer = io.StringIO()
     progress = cli._RunProgress(Console(file=buffer, force_terminal=True, width=80, color_system=None),

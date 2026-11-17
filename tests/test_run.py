@@ -1,5 +1,5 @@
 """
-Pruebas de la etapa ③: ejecución en dos pasadas, diario, --resume,
+Pruebas de la ejecución en dos pasadas: diario, --resume,
 espacio, desconexión, archivos modificados y clean-backups.
 
 Todo se hace sobre copias de la biblioteca de tools/generar_casos.py

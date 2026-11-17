@@ -85,7 +85,7 @@ def test_section_labels_are_kept():
     text = "[Coro: Artista]\n" + BODY
     result = strip(text)
     assert result.text == text
-    # Las secciones son letra: no se listan como desconocidas (antes de la rc3, sí).
+    # Las secciones son letra: no se listan como desconocidas.
     assert result.unknown_headers == []
     assert strip("[00:00.50]x\n[Coro: Artista]\n" + BODY).unknown_headers == []
 

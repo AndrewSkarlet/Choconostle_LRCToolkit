@@ -14,7 +14,7 @@ Dos modos:
 Se aplica a todas las copias de la letra: archivo .lrc/.txt y etiquetas
 incrustadas.
 
-Principio: solo cambia lo que se pidió. Las líneas que no son cabeceras
+Principio: solo cambia lo que piden las opciones. Las líneas que no son cabeceras
 se conservan byte por byte (codificación, BOM, saltos de línea mixtos,
 caracteres invisibles), salvo las marcas de tiempo al aplicar un offset.
 Si algo no se puede hacer con seguridad (varios offsets, offset
@@ -62,7 +62,7 @@ KIND_EMBEDDED = "embedded"
 STATUS_CHANGE = "change"
 STATUS_UNCHANGED = "unchanged"
 STATUS_DECISION = "decision"
-"""No se tocó: requiere una decisión del usuario (offsets)."""
+"""No se tocó: hay que decidir a mano (offsets)."""
 STATUS_SKIPPED = "skipped"
 STATUS_ERROR = "error"
 

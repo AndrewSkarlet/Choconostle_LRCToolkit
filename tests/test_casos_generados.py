@@ -283,7 +283,7 @@ def test_ogg_requires_full_rewrite_by_default(plan_casos):
 
 
 def test_apply_then_revert_generated_library(biblioteca):
-    """Etapa ②: todo vuelve idéntico byte a byte, también MP3, M4A, WavPack y Ogg."""
+    """Después de revert todo vuelve idéntico byte a byte, también MP3, M4A, WavPack y Ogg."""
     before = files_state(biblioteca)
     normalizer, changes = plan(biblioteca, allow_full_rewrite=True)
     planned = {change.path for change in changes if change.status == STATUS_CHANGE}

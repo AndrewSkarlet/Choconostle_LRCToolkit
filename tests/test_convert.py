@@ -1,10 +1,10 @@
 """
-Pruebas de la etapa ④: convert-lyrics.
+Pruebas de convert-lyrics.
 
 Todo sobre copias de la biblioteca de tools/generar_casos.py (fixture
 `casos`) o archivos creados con sus funciones. Lo que depende del sistema
 (diario, desconexión, reanudación) se ejecuta en los modos "posix" y
-"windows", como en la etapa ③.
+"windows", como en test_run.py.
 """
 
 import codecs

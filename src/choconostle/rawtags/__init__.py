@@ -165,5 +165,5 @@ class Slot:
         return self.label == "SYLT"
 
     def ref(self) -> dict:
-        """Identificador serializable (para el manifiesto)."""
+        """Identificador serializable de la letra (se guarda en el plan para encontrarla al aplicar)."""
         return {"tag_format": self.tag_format, "key": self.key, "index": self.index, "label": self.label}

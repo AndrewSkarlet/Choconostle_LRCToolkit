@@ -1,5 +1,5 @@
 """
-Regresión de memoria (etapa ⑥): el pico de Python al planificar, aplicar,
+Memoria: el pico de Python al planificar, aplicar,
 mostrar el reporte y revertir no debe crecer con el número de archivos.
 
 Se compara una biblioteca ×1 con otra ×20, hechas copiando carpetas de
@@ -22,9 +22,8 @@ from choconostle.report import print_run_report
 FOLDERS = ["02_saltos_de_linea", "03_cabeceras"]
 LIMIT_PER_ENTRY = 1024
 """
-Bytes de pico que puede añadir cada entrada aplicada. Medido en la etapa ⑥:
-648 con las correcciones y 2388 sin ellas (los eventos del diario y los
-resultados de revert enteros en memoria).
+Bytes de pico que puede añadir cada entrada aplicada. Medido: unos 650
+(ver docs/RENDIMIENTO.md).
 """
 
 

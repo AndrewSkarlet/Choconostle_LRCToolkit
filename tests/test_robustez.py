@@ -1,6 +1,6 @@
 """
-Pruebas de la etapa ⑤: lo que faltaba de la tabla de cobertura
-(tests/COBERTURA.md) para convert-lyrics, revert y clean-backups.
+Pruebas de robustez de convert-lyrics, revert y clean-backups (ver la
+tabla de tests/COBERTURA.md): interrupciones, desconexión y falta de espacio.
 
 Todo se ejecuta en los modos "posix" y "windows" (fixture paths_mode o el
 parámetro `paths` del simulador Unplug) sobre copias de la biblioteca de
@@ -476,9 +476,9 @@ def _drive_gone() -> OSError:
 def test_stop_summary_matches_diary(biblioteca, monkeypatch, paths, error):
     """
     Tras una desconexión, el resumen «Aplicadas / Con error / Sin aplicar»
-    coincide con los eventos done del diario. Antes, en Windows, Path.exists()
-    devolvía False con la SD quitada (WinError 21 o ENOENT), el diario se
-    leía como vacío y el resumen decía «Aplicadas 0».
+    coincide con los eventos done del diario. En Windows, Path.exists()
+    devuelve False con la SD quitada (WinError 21 o ENOENT): el diario no
+    debe leerse como vacío.
     """
     import re
     unplug = Unplug(monkeypatch, biblioteca, after=8, error=error, paths=paths)
