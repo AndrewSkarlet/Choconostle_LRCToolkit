@@ -558,6 +558,7 @@ def test_clean_backups_never_touches_incomplete_runs(biblioteca, monkeypatch, pa
     normalizer, planned = start(biblioteca)
     _age(planned.folder, 40)
 
+    # Respaldos de versiones no públicas (manifiesto.json): no se reconocen y nunca se borran.
     v2 = biblioteca / BACKUP_DIR_NAME / "2020-01-01_00-00-00"
     v2.mkdir()
     (v2 / "manifiesto.json").write_text(json.dumps({"manifest_version": 2, "created_at": "2020-01-01T00:00:00",
@@ -570,18 +571,18 @@ def test_clean_backups_never_touches_incomplete_runs(biblioteca, monkeypatch, pa
     (torn / "pendiente" / "edit-0001.json").write_text("{}", encoding="utf-8")
 
     remove, keep = runs.clean_backups(biblioteca, 30)
-    assert {info.folder for info in remove} == {done_old.folder, v2}
+    assert {info.folder for info in remove} == {done_old.folder}
     reasons = {info.folder: info.keep_reason for info in keep}
     assert "reanudable" in reasons[interrupted.folder]
     assert "reanudable" in reasons[planned.folder]
-    assert "interrumpidas" in reasons[torn]
+    assert "versión antigua" in reasons[v2] and "versión antigua" in reasons[torn]
     assert all(info.folder.exists() for info in remove)  # simulación: nada borrado
 
     result = runner.invoke(app, ["clean-backups", str(biblioteca), "--older-than", "30"])
     assert result.exit_code == 0 and "SIMULACIÓN" in result.output and "--apply" in result.output
     result = runner.invoke(app, ["clean-backups", str(biblioteca), "--older-than", "30", "--apply"])
     assert result.exit_code == 0 and "BORRADOS" in result.output
-    assert not done_old.folder.exists() and not v2.exists()
+    assert not done_old.folder.exists() and v2.exists()
     assert interrupted.folder.exists() and planned.folder.exists() and torn.exists()
     # La ejecución interrumpida se sigue pudiendo reanudar.
     assert runs.resume_check(runs.Run(interrupted.folder), biblioteca, normalizer) == []

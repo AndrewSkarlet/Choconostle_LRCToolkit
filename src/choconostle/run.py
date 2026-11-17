@@ -1340,12 +1340,16 @@ def recover_run(folder: Path) -> list[tuple[str, str, str]]:
 # Limpieza de respaldos
 # --------------------------------------------------------------------------
 
+UNRECOGNIZED = "no reconocida"
+"""Carpeta de ChoconostleLRCTool_back que no es un respaldo de este programa: nunca se borra."""
+
+
 @dataclass
 class BackupInfo:
     folder: Path
     created: datetime | None
     kind: str
-    """"v3", "v2" o "v1"."""
+    """"v3" (estado.json), "borrado interrumpido" o UNRECOGNIZED."""
     state: str
     keep_reason: str | None = None
     """Motivo para no borrarlo nunca (incompleto, reanudable, escrituras pendientes)."""
@@ -1392,21 +1396,10 @@ def _backup_info(folder: Path) -> BackupInfo:
         elif set(intents) - set(done):
             info.keep_reason = "hay escrituras sin confirmar en el diario"
         return info
-    manifest_path = folder / "manifiesto.json"
-    if manifest_path.is_file():
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError as exc:
-            return BackupInfo(folder, None, "v1/v2", "dañado", f"manifiesto ilegible ({exc})")
-        kind = f"v{manifest.get('manifest_version', 1)}"
-        info = BackupInfo(folder, _parse_date(manifest.get("created_at")), kind, "completada")
-        if pending:
-            info.keep_reason = "tiene escrituras interrumpidas sin resolver (usa recover)"
-        elif any(item.get("status") == "pending" for item in manifest.get("items", [])):
-            info.keep_reason = "hay letras sin confirmar en el manifiesto"
-        return info
-    return BackupInfo(folder, None, "desconocido", "desconocido",
-                      "no es una carpeta de respaldo reconocida")
+    if (folder / "manifiesto.json").is_file():
+        return BackupInfo(folder, None, UNRECOGNIZED, "no reconocida",
+                          "respaldo de una versión antigua (manifiesto.json) que ya no se puede revertir")
+    return BackupInfo(folder, None, UNRECOGNIZED, "no reconocida", "no es una carpeta de respaldo reconocida")
 
 
 def _parse_date(value: str | None) -> datetime | None:

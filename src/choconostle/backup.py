@@ -1,14 +1,8 @@
 """
 backup.py
 
-Respaldo y reversión de normalize-lyrics.
-
-Cada ejecución con --apply crea:
-
-    <biblioteca>/ChoconostleLRCTool_back/<fecha-hora>/
-        originales/      Texto original completo de cada letra modificada
-        registro.txt     Registro legible (cambios y diferencias)
-        manifiesto.json  Todo lo necesario para revertir
+Reversión y recuperación de las carpetas de respaldo de normalize-lyrics
+y convert-lyrics (estado.json, plan.jsonl y diario.jsonl; ver run.py).
 
 No se copian archivos de audio. De las letras incrustadas se guarda el
 texto (para leerlo) y los "parches" de la edición byte a byte: los bytes
@@ -31,18 +25,16 @@ from pathlib import Path
 
 from choconostle.config import APP_NAME, APP_VERSION, BACKUP_DIR_NAME
 from choconostle.embedded import open_editor
-from choconostle.legacy_embedded import EmbeddedError, EmbeddedLyrics
 from choconostle.rawtags import (
     MODE_FULL, Edit, Unsupported, apply_patches, invert_patches, patches_from_json,
 )
 from choconostle.rawtags.ogg import OggEditor
 from choconostle.rawtags.writer import (
-    RECOVERED_COMPLETE, RECOVERED_FAILED, VERIFY_AUTO, ChangedError, Journal, RestoreError, WriteError,
-    effective_verify, file_sha256, file_signature, recover, rewrite_with, write_edit,
+    VERIFY_AUTO, ChangedError, Journal, RestoreError, WriteError,
+    effective_verify, file_sha256, file_signature, rewrite_with, write_edit,
 )
 from choconostle.utils import write_file_atomic
 
-MANIFEST_NAME = "manifiesto.json"
 LOG_NAME = "registro.txt"
 ORIGINALS_DIR = "originales"
 
@@ -91,14 +83,6 @@ class RevertNoSpace(Exception):
     """No hay espacio libre suficiente para revertir; no se tocó nada."""
 
 
-def _library_root(folder: Path, manifest: dict) -> Path:
-    # Se prefiere la ubicación real del respaldo: la biblioteca pudo cambiar
-    # de ruta (otra letra de unidad en Windows, /sdcard en Android...).
-    if folder.parent.name == BACKUP_DIR_NAME:
-        return folder.parent.parent
-    return Path(manifest["root"])
-
-
 def _is_run(folder: Path) -> bool:
     """True si la carpeta es una ejecución de formato 3 (estado.json + plan + diario)."""
     return (Path(folder) / "estado.json").is_file()
@@ -109,33 +93,31 @@ class BackupNotFound(FileNotFoundError):
 
 
 def not_found_message(folder: Path) -> str:
-    return (f"No se encontró estado.json (ni manifiesto.json de versiones anteriores) en: {folder}\n"
+    return (f"No se encontró estado.json en: {folder}\n"
             "Comprueba que la ruta esté completa y en una sola línea: las rutas largas pueden partirse "
             "al copiarlas de la terminal. También puedes indicar la carpeta de la biblioteca con --latest "
             "para usar el respaldo más reciente.")
 
 
 def is_backup_folder(folder: Path) -> bool:
-    folder = Path(folder)
-    return _is_run(folder) or (folder / MANIFEST_NAME).is_file()
+    return _is_run(Path(folder))
 
 
 def backup_date(folder: Path) -> str:
     """Fecha de creación (ISO) de un respaldo, o el nombre de la carpeta si no se puede leer."""
-    for name in ("estado.json", MANIFEST_NAME):
-        path = Path(folder) / name
-        if path.is_file():
-            try:
-                return json.loads(path.read_text(encoding="utf-8")).get("created_at") or folder.name
-            except (OSError, json.JSONDecodeError):
-                break
+    path = Path(folder) / "estado.json"
+    if path.is_file():
+        try:
+            return json.loads(path.read_text(encoding="utf-8")).get("created_at") or Path(folder).name
+        except (OSError, json.JSONDecodeError):
+            pass
     return Path(folder).name
 
 
 def resolve_backup(path: Path, latest: bool = False) -> Path:
     """
-    Carpeta de respaldo a partir de lo que indicó el usuario: la carpeta
-    de un respaldo, o (con latest=True) la biblioteca o su carpeta
+    Carpeta de respaldo a partir de la ruta indicada: la carpeta de un
+    respaldo, o (con latest=True) la biblioteca o su carpeta
     ChoconostleLRCTool_back, de la que se toma el respaldo más reciente.
     """
     path = Path(path)
@@ -156,13 +138,11 @@ def resolve_backup(path: Path, latest: bool = False) -> Path:
 
 
 def load_manifest(folder: Path) -> dict:
-    if _is_run(folder):
-        from choconostle.run import Run
-        return Run(folder).manifest
-    path = Path(folder) / MANIFEST_NAME
-    if not path.is_file():
+    """Vista resumida de una ejecución (items por letra y ediciones por audio; ver Run.manifest)."""
+    if not _is_run(folder):
         raise BackupNotFound(not_found_message(folder))
-    return json.loads(path.read_text(encoding="utf-8"))
+    from choconostle.run import Run
+    return Run(folder).manifest
 
 
 def revert(folder: Path, force: bool = False, dry_run: bool = False, progress=None) -> list[RevertResult]:
@@ -174,37 +154,10 @@ def revert(folder: Path, force: bool = False, dry_run: bool = False, progress=No
     manual), se reporta como conflicto y no se toca, salvo con force=True.
     """
     folder = Path(folder)
-    if _is_run(folder):
-        from choconostle.run import revert_run
-        return revert_run(folder, force=force, dry_run=dry_run, progress=progress)
-    manifest = load_manifest(folder)
-    root = _library_root(folder, manifest)
-    results: list[RevertResult] = []
-    if not dry_run:
-        recover_session(folder)
-        manifest = load_manifest(folder)
-
-    embedded_by_path: dict[str, list[dict]] = {}
-    edits = {edit["id"]: edit for edit in manifest.get("edits", [])}
-    by_edit: dict[int, list[dict]] = {}
-    for item in manifest["items"]:
-        if item["kind"] == "file":
-            results.append(_revert_file(item, folder, root, force, dry_run))
-        elif item.get("edit") in edits:
-            by_edit.setdefault(item["edit"], []).append(item)
-        elif item["status"] == ITEM_FAILED and manifest.get("manifest_version", 1) >= 2:
-            results.append(RevertResult(item, REVERT_ALREADY, "No se había aplicado."))
-        else:
-            embedded_by_path.setdefault(item["path"], []).append(item)
-
-    for edit_id, items in by_edit.items():
-        results.extend(_revert_edit(edits[edit_id], items, folder, root, dry_run))
-    for relative, items in embedded_by_path.items():
-        results.extend(_revert_embedded(root / relative, items, force, dry_run))
-
-    if not dry_run:
-        _write_revert_log(folder, root, results)
-    return results
+    if not _is_run(folder):
+        raise BackupNotFound(not_found_message(folder))
+    from choconostle.run import revert_run
+    return revert_run(folder, force=force, dry_run=dry_run, progress=progress)
 
 
 def _revert_file(item: dict, folder: Path, root: Path, force: bool, dry_run: bool) -> RevertResult:
@@ -323,80 +276,14 @@ def _restore_mtime(path: Path, record: dict) -> None:
 
 def recover_session(folder: Path) -> list[tuple[str, str, str]]:
     """
-    Resuelve las escrituras interrumpidas de una carpeta de respaldo y
-    actualiza el manifiesto: una escritura que había terminado cuenta como
-    aplicada; una que no empezó o se restauró, como no aplicada.
+    Resuelve las escrituras interrumpidas de una carpeta de respaldo: deja
+    cada archivo como el original o como quedó aplicado.
     """
     folder = Path(folder)
-    if _is_run(folder):
-        from choconostle.run import recover_run
-        return recover_run(folder)
-    manifest = load_manifest(folder)
-    root = _library_root(folder, manifest)
-    results = recover(folder, root)
-    if not results:
-        return results
-    edits = {f"edit-{edit['id']:04d}": edit for edit in manifest.get("edits", [])}
-    items = {item["id"]: item for item in manifest["items"]}
-    for name, status, message in results:
-        edit = edits.get(name)
-        if edit is None:
-            continue
-        applied = status == RECOVERED_COMPLETE
-        if status == RECOVERED_FAILED:
-            edit["error"] = message
-            continue
-        edit["status"] = ITEM_APPLIED if applied else ITEM_FAILED
-        edit["error"] = None if applied else f"interrumpida: {message}"
-        for item_id in edit["items"]:
-            items[item_id]["status"] = edit["status"]
-            items[item_id]["error"] = edit["error"]
-    path = folder / MANIFEST_NAME
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(temporary, path)
-    return results
-
-
-def _revert_embedded(path: Path, items: list[dict], force: bool, dry_run: bool) -> list[RevertResult]:
-    try:
-        audio = EmbeddedLyrics(path)
-    except (EmbeddedError, OSError) as exc:
-        return [RevertResult(item, REVERT_ERROR, f"No se pudo abrir: {exc}") for item in items]
-    except Exception as exc:  # noqa: BLE001
-        return [RevertResult(item, REVERT_ERROR, f"No se pudo abrir: {exc}") for item in items]
-
-    results: list[RevertResult] = []
-    pending: list[RevertResult] = []
-    for item in items:
-        slot = audio.get(item["slot"])
-        if slot is None:
-            results.append(RevertResult(item, REVERT_CONFLICT,
-                                        f"La etiqueta {item['label']} ya no existe."))
-            continue
-        original = _python_value(item["original_value"])
-        new = _python_value(item["new_value"])
-        if slot.value == original and slot.id3_encoding == item.get("original_id3_encoding"):
-            results.append(RevertResult(item, REVERT_ALREADY, "Ya está como el original."))
-            continue
-        if slot.value != new and not force:
-            results.append(RevertResult(item, REVERT_CONFLICT,
-                                        "La etiqueta cambió después de normalizarla (usa --force)."))
-            continue
-        if not dry_run:
-            try:
-                audio.set(item["slot"], original, id3_encoding=item.get("original_id3_encoding"))
-            except Exception as exc:  # noqa: BLE001
-                results.append(RevertResult(item, REVERT_ERROR, f"No se pudo modificar: {exc}"))
-                continue
-        pending.append(RevertResult(item, REVERT_RESTORED, "Se restauraría." if dry_run else ""))
-
-    if pending and not dry_run:
-        try:
-            audio.save()
-        except Exception as exc:  # noqa: BLE001
-            pending = [RevertResult(r.item, REVERT_ERROR, f"No se pudo guardar: {exc}") for r in pending]
-    return results + pending
+    if not _is_run(folder):
+        raise BackupNotFound(not_found_message(folder))
+    from choconostle.run import recover_run
+    return recover_run(folder)
 
 
 def _write_revert_log(folder: Path, root: Path, results: list[RevertResult]) -> None:

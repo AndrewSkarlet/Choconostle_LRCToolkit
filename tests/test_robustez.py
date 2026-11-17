@@ -453,14 +453,14 @@ def test_backup_names_never_collide_with_interrupted_deletions(biblioteca, paths
     created = runs.Run.create(biblioteca, "normalize-lyrics", {}, now=moment)
     assert created.folder.name == "2020-01-01_12-00-00_2"
 
-    # Si de todos modos existe una carpeta con el nombre libre (p. ej. de otra versión), no choca.
+    # Si de todos modos existe una carpeta con el nombre libre (que no es un respaldo), no choca;
+    # clean-backups no la reconoce y nunca la borra.
     clash = base / "2020-01-01_12-00-00"
     (clash / "originales").mkdir(parents=True)
-    (clash / "manifiesto.json").write_text('{"manifest_version": 2, "created_at": "2020-01-01T12:00:00", '
-                                           '"items": []}', encoding="utf-8")
-    remove, _keep = runs.clean_backups(biblioteca, 30, apply=True)
+    remove, keep = runs.clean_backups(biblioteca, 30, apply=True)
     assert all(info.deleted for info in remove), [(i.folder, i.error) for i in remove]
-    assert not leftover.exists() and not clash.exists()
+    assert not leftover.exists() and clash.exists()
+    assert [info.kind for info in keep if info.folder == clash] == [runs.UNRECOGNIZED]
     assert not list(base.glob("*.borrando*"))
 
 
