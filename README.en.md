@@ -58,7 +58,7 @@ choconostle normalize-lyrics ~/Music --strip-headers            # simulation
 choconostle normalize-lyrics ~/Music --strip-headers --apply
 ```
 
-Some players do not load lyrics that start with LRC headers (`[ar:]`, `[ti:]`, `[by:]`...). This command fixes `.lrc`/`.txt` files and embedded lyrics. It edits only the bytes of the lyrics and keeps the encoding and line endings by default. Every change is backed up in `ChoconostleLRCTool_back/`. If the run stops (no space, SD card removed, Ctrl+C), it can be resumed with `--resume`. Details: [Normalizar letras](README.md#normalizar-letras-fase-2), [Bibliotecas grandes](README.md#bibliotecas-grandes-tarjeta-sd).
+Some players do not load lyrics that start with LRC headers (`[ar:]`, `[ti:]`, `[by:]`...). This command fixes `.lrc`/`.txt` files and embedded lyrics. It edits only the bytes of the lyrics and keeps the encoding and line endings by default. Every change is backed up in `ChoconostleLRCTool_back/`. If the run stops (no space, SD card removed, Ctrl+C), it can be resumed with `--resume`. Details: [Normalizar letras](README.md#normalizar-letras-normalize-lyrics), [Bibliotecas grandes](README.md#bibliotecas-grandes-tarjeta-sd).
 
 ### `convert-lyrics`: change encoding, line endings or characters
 

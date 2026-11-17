@@ -410,9 +410,8 @@ Cada entrada pasa por estos pasos, y una interrupción en cualquiera de ellos se
 - Antes de empezar se comprueba el espacio libre (el temporal más grande más un margen).
 - Si la unidad se desconecta o se queda sin espacio, `revert` se detiene (código 3) y muestra el comando para repetirlo; al repetirlo continúa donde quedó.
 - Un acceso denegado o una copia de respaldo que falta solo afectan a ese archivo (código 1).
-- Los respaldos de versiones anteriores (manifiesto versión 1 y 2) se siguen pudiendo revertir.
 - `choconostle revert <biblioteca> --latest` usa el respaldo más reciente. También acepta la carpeta `ChoconostleLRCTool_back`. Sin `--latest`, lista los últimos respaldos para elegir.
-- Si la carpeta no es un respaldo, el mensaje indica qué archivo se buscaba (`estado.json`, o `manifiesto.json` en versiones anteriores) y recuerda comprobar que la ruta esté completa y en una sola línea.
+- Si la carpeta no es un respaldo, el mensaje indica qué archivo se buscaba (`estado.json`) y recuerda comprobar que la ruta esté completa y en una sola línea.
 
 Las rutas y comandos que hay que copiar («Para deshacer», «Para continuar», «Respaldo guardado en») se imprimen sin saltos de línea, aunque sean más largos que la terminal. La terminal los muestra en varias filas, pero se copian como una sola línea.
 
@@ -567,12 +566,11 @@ src/choconostle/
 ├── matroska.py         Lector mínimo de .mka (mutagen no lo soporta)
 ├── embedded.py         Elige el editor de letras incrustadas de cada formato
 ├── rawtags/            Edición byte a byte: id3, flac, mp4, apev2, ogg y writer (escritura verificada, diario)
-├── legacy_embedded.py  Edición con mutagen de la v0.2.0 (solo para revertir respaldos antiguos)
 ├── normalizer.py       normalize-lyrics: cabeceras, offset, codificación
 ├── converter.py        convert-lyrics: codificación, saltos de línea, sustituciones, --id3-encoding
 ├── textio.py           Líneas sin pérdida, detección y conversión de codificación, diff
 ├── run.py              Ejecución en dos pasadas: plan en disco, diario, --resume, clean-backups
-├── backup.py           revert (todas las versiones de respaldo) y recover
+├── backup.py           revert y recover
 ├── gallery.py          fix-gallery: .nomedia en las carpetas de álbum y lista de lo creado
 ├── lrc.py              Análisis de letras: marcas de tiempo, cabeceras, BOM, codificación
 ├── albums.py           Agrupa pistas en álbumes
