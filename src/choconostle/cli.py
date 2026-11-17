@@ -1089,8 +1089,14 @@ def clean_backups(
 
 def _print_clean(console: Console, path: Path, older_than: int, apply: bool, remove, keep, stopped,
                  compact: bool = False, exported: Path | None = None) -> None:
-    """Resultado de clean-backups. Lo que no se pudo borrar se lista siempre completo."""
+    """
+    Resultado de clean-backups. Lo que no se pudo borrar y las carpetas no
+    reconocidas (que nunca se borran) se listan siempre completos, también
+    en la vista compacta.
+    """
     base = path / BACKUP_DIR_NAME
+    unrecognized = [info for info in keep if info.kind == runs.UNRECOGNIZED]
+    keep = [info for info in keep if info.kind != runs.UNRECOGNIZED]
     title = "BORRADOS" if apply else "SIMULACIÓN (no se borró nada)"
     console.print(f"[bold]clean-backups - {title}[/bold]")
     print_copyable(console, f"Respaldos de más de {older_than} días en {base}")
@@ -1114,10 +1120,18 @@ def _print_clean(console: Console, path: Path, older_than: int, apply: bool, rem
             console.print(Text(f"  {info.folder.name}  {info.state}: {info.keep_reason}",
                                style="yellow" if "reanudable" in (info.keep_reason or "")
                                or "interrumpidas" in (info.keep_reason or "") else ""))
+    if unrecognized:
+        console.print()
+        console.print(f"Carpetas no reconocidas ({len(unrecognized)}): clean-backups nunca las borra. "
+                      "Si no las necesitas, puedes borrarlas a mano:", style="yellow", markup=False)
+        for info in unrecognized:
+            print_copyable(console, f"  {info.folder}")
+            console.print(Text(f"    {info.keep_reason}", style="dim"))
     # Bloque final (las dos vistas): resumen, tiempo total, respaldos y siguiente acción.
     console.print()
     console.print(f"Resumen: {label.lower()} {len(deleted)} ({format_size(sum(i.size for i in deleted))}), "
-                  f"se conservan {len(keep)}, no se pudieron borrar {len(failed)}", markup=False)
+                  f"se conservan {len(keep)}, no se pudieron borrar {len(failed)}"
+                  + (f", no reconocidas {len(unrecognized)}" if unrecognized else ""), markup=False)
     if exported is not None:
         console.print("Lista completa guardada en:", markup=False)
         print_copyable(console, str(exported))
